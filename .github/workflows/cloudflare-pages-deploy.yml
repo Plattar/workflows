@@ -1,0 +1,319 @@
+name: Cloudflare Pages Deploy
+
+on:
+  workflow_call:
+    inputs:
+      # -----------------------------------------------------------------------
+      # Deployment Parameters (passed from trigger)
+      # -----------------------------------------------------------------------
+      tag:
+        description: 'Tag to deploy'
+        required: true
+        type: string
+      environment:
+        description: 'Target environment (staging, review, production, or empty for build-only)'
+        required: false
+        type: string
+        default: ''
+      trigger-type:
+        description: 'How the workflow was triggered (tag-push or manual)'
+        required: true
+        type: string
+      # -----------------------------------------------------------------------
+      # Project Configuration
+      # -----------------------------------------------------------------------
+      project-name:
+        description: 'Base project name in Cloudflare Pages'
+        required: true
+        type: string
+      domain-suffix:
+        description: 'Domain suffix for custom domains'
+        required: false
+        type: string
+        default: 'plattar.com'
+      # -----------------------------------------------------------------------
+      # Build Configuration
+      # -----------------------------------------------------------------------
+      build-directory:
+        description: 'Directory containing package.json'
+        required: false
+        type: string
+        default: '.'
+      output-directory:
+        description: 'Build output path relative to build-directory'
+        required: false
+        type: string
+        default: 'build'
+      build-command:
+        description: 'Build command to execute'
+        required: false
+        type: string
+        default: 'npm run clean:build'
+      node-version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: 'latest'
+      # -----------------------------------------------------------------------
+      # Artifact Configuration
+      # -----------------------------------------------------------------------
+      artifact-retention-days:
+        description: 'Number of days to retain build artifacts'
+        required: false
+        type: number
+        default: 120
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        description: 'Cloudflare API token with Pages deployment permissions'
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        description: 'Cloudflare account identifier'
+        required: true
+    outputs:
+      version:
+        description: 'Deployed version number'
+        value: ${{ jobs.build.outputs.version }}
+      environment:
+        description: 'Target environment'
+        value: ${{ jobs.build.outputs.environment }}
+      deployment-url:
+        description: 'Primary deployment URL'
+        value: ${{ jobs.deploy.outputs.deployment-url }}
+      version-url:
+        description: 'Version-specific deployment URL'
+        value: ${{ jobs.deploy.outputs.version-url }}
+
+jobs:
+  # ===========================================================================
+  # Build Job
+  # ===========================================================================
+  build:
+    name: Build Application
+    runs-on: ubuntu-latest
+    outputs:
+      tag-name: ${{ steps.parse.outputs.tag }}
+      version: ${{ steps.parse.outputs.version }}
+      environment: ${{ steps.parse.outputs.environment }}
+      artifact-name: ${{ steps.parse.outputs.artifact-name }}
+      should-deploy: ${{ steps.parse.outputs.should-deploy }}
+    steps:
+      - name: Parse deployment parameters
+        id: parse
+        run: |
+          TAG_NAME="${{ inputs.tag }}"
+          TRIGGER_TYPE="${{ inputs.trigger-type }}"
+          
+          if [[ "$TRIGGER_TYPE" == "manual" ]]; then
+            VERSION="${TAG_NAME}"
+            ENVIRONMENT="${{ inputs.environment }}"
+            SHOULD_DEPLOY="true"
+            
+            if [[ -z "$ENVIRONMENT" ]]; then
+              SHOULD_DEPLOY="false"
+            fi
+          else
+            # Parse tag to extract version and environment
+            if [[ "$TAG_NAME" =~ ^(.+)-(staging|production|review)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+              ENVIRONMENT="${BASH_REMATCH[2]}"
+              SHOULD_DEPLOY="true"
+            elif [[ "$TAG_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+              VERSION="$TAG_NAME"
+              ENVIRONMENT=""
+              SHOULD_DEPLOY="false"
+            else
+              echo "ERROR: Invalid tag format: $TAG_NAME"
+              echo ""
+              echo "Expected formats:"
+              echo "  {version}            - Build only (e.g., 1.2.0)"
+              echo "  {version}-staging    - Deploy to staging"
+              echo "  {version}-production - Deploy to production"
+              echo "  {version}-review     - Deploy to review"
+              exit 1
+            fi
+          fi
+          
+          ARTIFACT_NAME="build-${{ inputs.project-name }}-${VERSION}"
+          
+          echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
+          echo "artifact-name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
+          echo "should-deploy=${SHOULD_DEPLOY}" >> $GITHUB_OUTPUT
+      - name: Generate build summary
+        run: |
+          echo "## Build Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Project | \`${{ inputs.project-name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`${{ steps.parse.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ steps.parse.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | \`${{ inputs.trigger-type }}\` |" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.parse.outputs.should-deploy }}" == "true" ]]; then
+            echo "| Environment | \`${{ steps.parse.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Action | Build and Deploy |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Action | Build Only |" >> $GITHUB_STEP_SUMMARY
+          fi
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.parse.outputs.tag }}
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Build application
+        working-directory: ${{ inputs.build-directory }}
+        run: ${{ inputs.build-command }}
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.parse.outputs.artifact-name }}
+          path: ${{ inputs.build-directory }}/${{ inputs.output-directory }}
+          retention-days: ${{ inputs.artifact-retention-days }}
+          if-no-files-found: error
+  # ===========================================================================
+  # Deploy Job
+  # ===========================================================================
+  deploy:
+    name: Deploy to ${{ needs.build.outputs.environment }}
+    needs: build
+    runs-on: ubuntu-latest
+    if: needs.build.outputs.should-deploy == 'true'
+    outputs:
+      deployment-url: ${{ steps.config.outputs.pages-url }}
+      version-url: ${{ steps.urls.outputs.version-url }}
+    environment:
+      name: ${{ needs.build.outputs.environment }}
+      url: ${{ steps.config.outputs.pages-url }}
+    steps:
+      - name: Configure deployment parameters
+        id: config
+        run: |
+          PROJECT_NAME="${{ inputs.project-name }}"
+          ENVIRONMENT="${{ needs.build.outputs.environment }}"
+          DOMAIN_SUFFIX="${{ inputs.domain-suffix }}"
+          
+          if [[ "$ENVIRONMENT" == "production" ]]; then
+            CF_PROJECT="${PROJECT_NAME}"
+            CUSTOM_DOMAIN="${PROJECT_NAME}.${DOMAIN_SUFFIX}"
+          else
+            CF_PROJECT="${PROJECT_NAME}-${ENVIRONMENT}"
+            CUSTOM_DOMAIN="${PROJECT_NAME}-${ENVIRONMENT}.${DOMAIN_SUFFIX}"
+          fi
+          
+          echo "cloudflare-project=${CF_PROJECT}" >> $GITHUB_OUTPUT
+          echo "custom-domain=${CUSTOM_DOMAIN}" >> $GITHUB_OUTPUT
+          echo "pages-url=https://${CF_PROJECT}.pages.dev" >> $GITHUB_OUTPUT
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: ./deploy
+      - name: Deploy version branch
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy ./deploy --project-name ${{ steps.config.outputs.cloudflare-project }} --branch ${{ needs.build.outputs.version }}
+      - name: Deploy production branch
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy ./deploy --project-name ${{ steps.config.outputs.cloudflare-project }} --branch main
+      - name: Calculate URLs
+        id: urls
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          CF_PROJECT="${{ steps.config.outputs.cloudflare-project }}"
+          echo "version-url=https://${VERSION}.${CF_PROJECT}.pages.dev" >> $GITHUB_OUTPUT
+      - name: Generate deployment summary
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          CF_PROJECT="${{ steps.config.outputs.cloudflare-project }}"
+          PAGES_URL="${{ steps.config.outputs.pages-url }}"
+          VERSION_URL="${{ steps.urls.outputs.version-url }}"
+          CUSTOM_DOMAIN="${{ steps.config.outputs.custom-domain }}"
+          
+          echo "## Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`${{ needs.build.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cloudflare Project | \`${CF_PROJECT}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment URLs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Type | URL |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| Custom Domain | [${CUSTOM_DOMAIN}](https://${CUSTOM_DOMAIN}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Pages URL | [${CF_PROJECT}.pages.dev](${PAGES_URL}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version URL | [${VERSION}.${CF_PROJECT}.pages.dev](${VERSION_URL}) |" >> $GITHUB_STEP_SUMMARY
+      - name: Update GitHub Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ needs.build.outputs.version }}';
+            const environment = '${{ needs.build.outputs.environment }}';
+            const customDomain = '${{ steps.config.outputs.custom-domain }}';
+            const pagesUrl = '${{ steps.config.outputs.pages-url }}';
+            const cfProject = '${{ steps.config.outputs.cloudflare-project }}';
+            const versionUrl = '${{ steps.urls.outputs.version-url }}';
+            const deploymentType = '${{ inputs.trigger-type }}' === 'manual' ? 'Manual' : 'Automatic';
+            const timestamp = new Date().toISOString().split('T')[0];
+            
+            try {
+              let release;
+              
+              try {
+                release = await github.rest.repos.getReleaseByTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag: version
+                });
+              } catch (error) {
+                if (error.status === 404) {
+                  const isPrerelease = /-(alpha|beta|rc|preview)/i.test(version);
+                  release = await github.rest.repos.createRelease({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    tag_name: version,
+                    name: `Release ${version}`,
+                    body: `## Release ${version}\n\n### Deployments\n`,
+                    draft: false,
+                    prerelease: isPrerelease
+                  });
+                } else {
+                  throw error;
+                }
+              }
+              
+              const currentBody = release.data.body || '';
+              const deploymentEntry = `- **${environment}** (${deploymentType}): [${customDomain}](https://${customDomain}) | [Pages](${pagesUrl}) | [Version](${versionUrl}) - ${timestamp}`;
+              
+              const envPattern = new RegExp(`- \\*\\*${environment}\\*\\*.*`, 'g');
+              let updatedBody;
+              
+              if (envPattern.test(currentBody)) {
+                updatedBody = currentBody.replace(envPattern, deploymentEntry);
+              } else if (currentBody.includes('### Deployments')) {
+                updatedBody = currentBody.replace('### Deployments\n', `### Deployments\n${deploymentEntry}\n`);
+              } else {
+                updatedBody = currentBody + `\n\n### Deployments\n${deploymentEntry}\n`;
+              }
+              
+              await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id,
+                body: updatedBody
+              });
+              
+              core.info(`Updated release notes for version ${version}`);
+            } catch (error) {
+              core.warning(`Could not update release notes: ${error.message}`);
+            }
