@@ -1,0 +1,254 @@
+# =============================================================================
+# Reusable NPM Publish Workflow
+# Location: Plattar/workflows/.github/workflows/npm-publish.yml
+#
+# This workflow handles:
+#   - NPM package publishing with support for stable, beta, and alpha releases
+#   - Public and private package publishing
+#   - Optional AWS S3 deployment
+#   - JSDelivr CDN cache purging
+#
+# Tag Format Examples:
+#   - Stable:  1.0.0, 2.3.1
+#   - Beta:    1.0.0-beta.1, 2.0.0-beta
+#   - Alpha:   1.0.0-alpha.1, 2.0.0-alpha
+# =============================================================================
+name: NPM Publish
+on:
+  workflow_call:
+    inputs:
+      # -------------------------------------------------------------------------
+      # Required Inputs
+      # -------------------------------------------------------------------------
+      package-directory:
+        description: 'Directory containing the package to publish (e.g., "plattar-ar-adapter")'
+        required: true
+        type: string
+      npm-scope:
+        description: 'NPM scope without @ symbol (e.g., "plattar" for @plattar/package-name)'
+        required: true
+        type: string
+      # -------------------------------------------------------------------------
+      # Build Configuration
+      # -------------------------------------------------------------------------
+      node-version:
+        description: 'Node.js version to use for building'
+        required: false
+        type: string
+        default: 'latest'
+      build-command:
+        description: 'NPM script command to run for building (without "npm run" prefix)'
+        required: false
+        type: string
+        default: 'clean:build'
+      # -------------------------------------------------------------------------
+      # NPM Publishing Configuration
+      # -------------------------------------------------------------------------
+      npm-access:
+        description: 'NPM package access level: "public" or "restricted" (private)'
+        required: false
+        type: string
+        default: 'restricted'
+      # -------------------------------------------------------------------------
+      # File Copy Options
+      # -------------------------------------------------------------------------
+      copy-readme:
+        description: 'Copy root README.md to package directory'
+        required: false
+        type: boolean
+        default: true
+      copy-graphics:
+        description: 'Copy root graphics/ directory to package directory'
+        required: false
+        type: boolean
+        default: true
+      # -------------------------------------------------------------------------
+      # AWS S3 Configuration (Optional)
+      # -------------------------------------------------------------------------
+      enable-s3-upload:
+        description: 'Enable AWS S3 upload'
+        required: false
+        type: boolean
+        default: false
+      s3-source-subdir:
+        description: 'Source subdirectory within package for S3 sync (e.g., "build/es2019")'
+        required: false
+        type: string
+        default: 'build/es2019'
+      s3-dest-prefix:
+        description: 'S3 destination prefix path (e.g., "public-sdk")'
+        required: false
+        type: string
+        default: 'public-sdk'
+      # -------------------------------------------------------------------------
+      # CDN Cache Purge Configuration
+      # -------------------------------------------------------------------------
+      cdn-purge-urls:
+        description: |
+          Newline-separated list of JSDelivr URLs to purge.
+          Leave empty to skip cache purging.
+        required: false
+        type: string
+        default: ''
+    # ---------------------------------------------------------------------------
+    # Secrets
+    # ---------------------------------------------------------------------------
+    secrets:
+      NPM_PUBLISH_KEY:
+        description: 'NPM authentication token for publishing'
+        required: true
+      AWS_S3_BUCKET:
+        description: 'AWS S3 bucket name (required if enable-s3-upload is true)'
+        required: false
+      AWS_S3_ACCESS_KEY_ID:
+        description: 'AWS access key ID (required if enable-s3-upload is true)'
+        required: false
+      AWS_S3_SECRET_ACCESS_KEY:
+        description: 'AWS secret access key (required if enable-s3-upload is true)'
+        required: false
+      AWS_S3_REGION:
+        description: 'AWS S3 region (required if enable-s3-upload is true)'
+        required: false
+    # ---------------------------------------------------------------------------
+    # Outputs
+    # ---------------------------------------------------------------------------
+    outputs:
+      version:
+        description: 'The version that was published'
+        value: ${{ jobs.publish.outputs.version }}
+      npm-tag:
+        description: 'The NPM tag used (latest, beta, or alpha)'
+        value: ${{ jobs.publish.outputs.npm-tag }}
+      is-prerelease:
+        description: 'Whether this is a pre-release version'
+        value: ${{ jobs.publish.outputs.is-prerelease }}
+jobs:
+  # =============================================================================
+  # Publish Job - Handles NPM publishing and optional S3 upload
+  # =============================================================================
+  publish:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse-version.outputs.version }}
+      npm-tag: ${{ steps.parse-version.outputs.npm-tag }}
+      is-prerelease: ${{ steps.parse-version.outputs.is-prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Parse version and determine NPM tag
+        id: parse-version
+        run: |
+          # Extract version from git tag
+          VERSION="${GITHUB_REF#refs/tags/}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+          # Determine NPM distribution tag based on version string
+          # - beta versions: 1.0.0-beta.1, 1.0.0-beta
+          # - alpha versions: 1.0.0-alpha.1, 1.0.0-alpha
+          # - stable versions: 1.0.0, 2.3.1
+          if [[ "$VERSION" == *"-beta"* ]]; then
+            echo "npm-tag=beta" >> $GITHUB_OUTPUT
+            echo "is-prerelease=true" >> $GITHUB_OUTPUT
+            echo "NPM Tag: beta (pre-release)"
+          elif [[ "$VERSION" == *"-alpha"* ]]; then
+            echo "npm-tag=alpha" >> $GITHUB_OUTPUT
+            echo "is-prerelease=true" >> $GITHUB_OUTPUT
+            echo "NPM Tag: alpha (pre-release)"
+          else
+            echo "npm-tag=latest" >> $GITHUB_OUTPUT
+            echo "is-prerelease=false" >> $GITHUB_OUTPUT
+            echo "NPM Tag: latest (stable)"
+          fi
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: 'https://registry.npmjs.org'
+      - name: Configure Git
+        run: |
+          git config user.email "info@plattar.com"
+          git config user.name "Plattar"
+      - name: Update package.json version
+        run: npm version --prefix ${{ inputs.package-directory }} ${{ steps.parse-version.outputs.version }} --allow-same-version --no-git-tag-version
+      - name: Write version.ts
+        run: |
+          VERSION_FILE="${{ inputs.package-directory }}/src/version.ts"
+          rm -f "$VERSION_FILE"
+          echo 'export default "${{ steps.parse-version.outputs.version }}";' > "$VERSION_FILE"
+          echo "Updated $VERSION_FILE"
+      - name: Copy README.md
+        if: inputs.copy-readme
+        run: |
+          if [ -f "README.md" ]; then
+            cp README.md ${{ inputs.package-directory }}/README.md
+            echo "Copied README.md"
+          else
+            echo "Warning: No README.md found in root directory"
+          fi
+      - name: Copy graphics directory
+        if: inputs.copy-graphics
+        run: |
+          if [ -d "graphics" ]; then
+            cp -R graphics ${{ inputs.package-directory }}/
+            echo "Copied graphics directory"
+          else
+            echo "Warning: No graphics directory found in root"
+          fi
+      - name: Build package
+        run: npm run --prefix ${{ inputs.package-directory }} ${{ inputs.build-command }}
+      - name: Publish to NPM
+        uses: JS-DevTools/npm-publish@v3
+        with:
+          package: ./${{ inputs.package-directory }}/package.json
+          token: ${{ secrets.NPM_PUBLISH_KEY }}
+          access: ${{ inputs.npm-access }}
+          tag: ${{ steps.parse-version.outputs.npm-tag }}
+      - name: NPM Publish Summary
+        run: |
+          echo "## NPM Publish Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | \`@${{ inputs.npm-scope }}/${{ inputs.package-directory }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ steps.parse-version.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| NPM Tag | \`${{ steps.parse-version.outputs.npm-tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Access | \`${{ inputs.npm-access }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Pre-release | ${{ steps.parse-version.outputs.is-prerelease }} |" >> $GITHUB_STEP_SUMMARY
+      - name: Upload to AWS S3
+        if: inputs.enable-s3-upload
+        uses: jakejarvis/s3-sync-action@master
+        with:
+          args: --acl public-read --follow-symlinks --delete
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_S3_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_S3_REGION }}
+          SOURCE_DIR: './${{ inputs.package-directory }}/${{ inputs.s3-source-subdir }}'
+          DEST_DIR: '${{ inputs.s3-dest-prefix }}/${{ inputs.package-directory }}/${{ steps.parse-version.outputs.version }}/'
+      - name: S3 Upload Summary
+        if: inputs.enable-s3-upload
+        run: |
+          echo "## AWS S3 Upload Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Destination | \`${{ inputs.s3-dest-prefix }}/${{ inputs.package-directory }}/${{ steps.parse-version.outputs.version }}/\` |" >> $GITHUB_STEP_SUMMARY
+  # =============================================================================
+  # Purge Cache Job - Handles JSDelivr CDN cache invalidation
+  # =============================================================================
+  purge-cache:
+    needs: publish
+    runs-on: ubuntu-latest
+    if: inputs.cdn-purge-urls != ''
+    steps:
+      - name: Purge JSDelivr CDN Cache
+        uses: gacts/purge-jsdelivr-cache@v1
+        with:
+          url: ${{ inputs.cdn-purge-urls }}
+      - name: Cache Purge Summary
+        run: |
+          echo "## JSDelivr Cache Purged" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Cache purge completed successfully" >> $GITHUB_STEP_SUMMARY
