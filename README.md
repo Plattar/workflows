@@ -13,12 +13,22 @@ Builds and deploys applications to Cloudflare Pages with multi-environment suppo
 uses: Plattar/workflows/.github/workflows/cloudflare-pages-deploy.yml@main
 ```
 
-## Usage
+### ECR Build & Publish
+
+Builds and publishes Docker images to AWS ECR. Designed for TypeScript projects.
+
+**Reference:**
+```yaml
+uses: Plattar/workflows/.github/workflows/ecr-publish.yml@main
+```
+
+---
+
+## Cloudflare Pages Deploy
 
 ### Caller Workflow
 
 Create `.github/workflows/deploy.yml` in your repository:
-
 ```yaml
 name: Deploy
 on:
@@ -94,3 +104,97 @@ Configure these in your repository under **Settings > Secrets and Variables > Ac
 | `1.0.0-staging` | Build and deploy to staging |
 | `1.0.0-review` | Build and deploy to review |
 | `1.0.0-production` | Build and deploy to production |
+
+---
+
+## ECR Build & Publish
+
+Builds Docker images and publishes them to AWS ECR. Designed for TypeScript projects - automatically updates the version file at `{repository}/src/version.ts` with the release version from the git tag.
+
+### Caller Workflow
+
+Create `.github/workflows/publish.yml` in your repository:
+```yaml
+name: ECR Publish
+on:
+  push:
+    tags:
+      - '*.*.*'
+jobs:
+  publish:
+    uses: Plattar/workflows/.github/workflows/ecr-publish.yml@main
+    with:
+      repository: your-service-name
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      NPM_PUBLISH_KEY: ${{ secrets.NPM_PUBLISH_KEY }}
+```
+
+### Required Secrets
+
+Configure these in your repository under **Settings > Secrets and Variables > Actions**:
+
+| Secret | Description |
+|--------|-------------|
+| `AWS_ACCESS_KEY_ID` | AWS Access Key ID with permissions for ECR |
+| `AWS_SECRET_ACCESS_KEY` | AWS Secret Access Key |
+
+### Optional Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `NPM_PUBLISH_KEY` | NPM token for private packages |
+| `DOCKER_BUILD_SECRETS` | Additional secrets for Docker build as KEY=VALUE pairs, newline separated |
+
+### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `repository` | Yes | - | Name of the repository/service. Used for ECR repository name, AWS role session name, and version.ts file path |
+| `aws-region` | No | `ap-southeast-2` | AWS region for ECR |
+| `dockerfile-path` | No | `.` | Path to Dockerfile context directory |
+| `docker-build-args` | No | - | Additional Docker build arguments (multiline, one per line: ARG_NAME=value) |
+
+### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `image-uri` | Full URI of the published Docker image in ECR |
+| `image-tag` | Tag/version of the published image |
+
+### Tag Conventions
+
+Tags must follow semantic versioning format:
+
+| Format | Example |
+|--------|---------|
+| `MAJOR.MINOR.PATCH` | `1.0.0`, `2.1.3` |
+
+### Using Outputs
+
+You can use the workflow outputs in subsequent jobs:
+```yaml
+name: ECR Publish
+on:
+  push:
+    tags:
+      - '*.*.*'
+jobs:
+  publish:
+    uses: Plattar/workflows/.github/workflows/ecr-publish.yml@main
+    with:
+      repository: your-service-name
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  post-publish:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use published image info
+        run: |
+          echo "Published image: ${{ needs.publish.outputs.image-uri }}"
+          echo "Version: ${{ needs.publish.outputs.image-tag }}"
+```

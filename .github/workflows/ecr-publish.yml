@@ -1,0 +1,141 @@
+name: ECR Build & Publish
+# Reusable workflow for building and publishing Docker images to AWS ECR.
+#
+# Designed for TypeScript projects - automatically updates version.ts file
+# at {repository}/src/version.ts with the release version from the git tag.
+#
+# Usage:
+#   jobs:
+#     publish:
+#       uses: Plattar/workflows/.github/workflows/ecr-publish.yml@main
+#       with:
+#         repository: my-service-name
+#       secrets:
+#         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: 'Name of the repository/service. Used for ECR repository name, AWS role session name, and version.ts file path ({repository}/src/version.ts)'
+        required: true
+        type: string
+      aws-region:
+        description: 'AWS region for ECR'
+        required: false
+        type: string
+        default: 'ap-southeast-2'
+      dockerfile-path:
+        description: 'Path to Dockerfile context directory'
+        required: false
+        type: string
+        default: '.'
+      docker-build-args:
+        description: 'Additional Docker build arguments (multiline, one per line: ARG_NAME=value)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        description: 'AWS Access Key ID with permissions for ECR'
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        description: 'AWS Secret Access Key'
+        required: true
+      NPM_PUBLISH_KEY:
+        description: 'NPM token for private packages (optional)'
+        required: false
+      DOCKER_BUILD_SECRETS:
+        description: 'Additional secrets for Docker build as KEY=VALUE pairs, newline separated'
+        required: false
+    outputs:
+      image-uri:
+        description: 'Full URI of the published Docker image in ECR'
+        value: ${{ jobs.publish.outputs.image-uri }}
+      image-tag:
+        description: 'Tag/version of the published image'
+        value: ${{ jobs.publish.outputs.image-tag }}
+jobs:
+  publish:
+    name: ECR Build & Publish
+    runs-on: ubuntu-latest
+    outputs:
+      image-uri: ${{ steps.build-push.outputs.image-uri }}
+      image-tag: ${{ env.RELEASE_VERSION }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          echo "RELEASE_VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION}"
+      - name: Update TypeScript version file
+        run: |
+          VERSION_FILE="${{ inputs.repository }}/src/version.ts"
+
+          mkdir -p "$(dirname "${VERSION_FILE}")"
+
+          rm -f "${VERSION_FILE}"
+          echo 'export default "${{ env.RELEASE_VERSION }}";' > "${VERSION_FILE}"
+
+          echo "Updated version file: ${VERSION_FILE}"
+          cat "${VERSION_FILE}"
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws-region }}
+          role-session-name: ${{ inputs.repository }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: 'true'
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-push
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ inputs.repository }}
+          IMAGE_TAG: ${{ env.RELEASE_VERSION }}
+          NPM_TOKEN: ${{ secrets.NPM_PUBLISH_KEY }}
+          EXTRA_BUILD_ARGS: ${{ inputs.docker-build-args }}
+          EXTRA_SECRETS: ${{ secrets.DOCKER_BUILD_SECRETS }}
+        run: |
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          BUILD_CMD="docker build -t ${IMAGE_URI}"
+
+          if [ -n "${NPM_TOKEN}" ]; then
+            BUILD_CMD="${BUILD_CMD} --build-arg npm_token=${NPM_TOKEN}"
+          fi
+
+          if [ -n "${EXTRA_BUILD_ARGS}" ]; then
+            while IFS= read -r arg; do
+              if [ -n "${arg}" ]; then
+                BUILD_CMD="${BUILD_CMD} --build-arg ${arg}"
+              fi
+            done <<< "${EXTRA_BUILD_ARGS}"
+          fi
+
+          if [ -n "${EXTRA_SECRETS}" ]; then
+            while IFS= read -r secret; do
+              if [ -n "${secret}" ]; then
+                BUILD_CMD="${BUILD_CMD} --build-arg ${secret}"
+              fi
+            done <<< "${EXTRA_SECRETS}"
+          fi
+
+          BUILD_CMD="${BUILD_CMD} ${{ inputs.dockerfile-path }}"
+
+          echo "Building image..."
+          eval ${BUILD_CMD}
+
+          echo "Pushing image to ECR..."
+          docker push ${IMAGE_URI}
+
+          echo "image-uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "Published: ${IMAGE_URI}"
