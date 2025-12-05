@@ -1,0 +1,441 @@
+# .github/workflows/generate-folder-markdown.yml
+# Reusable workflow to generate a markdown file from folder contents
+# Useful for feeding codebases into AI/LLMs for code analysis, improvements, or rewrites
+#
+# Usage:
+#   jobs:
+#     generate-docs:
+#       uses: Plattar/workflows/.github/workflows/generate-folder-markdown.yml@main
+#       with:
+#         target_folder: 'src'
+name: Generate Markdown from Folder
+on:
+  workflow_call:
+    inputs:
+      target_folder:
+        description: 'The folder to scan and generate markdown from'
+        required: true
+        type: string
+      output_filename:
+        description: 'Custom output filename (without .md extension). Defaults to {folder}_contents'
+        required: false
+        type: string
+        default: ''
+      artifact_name:
+        description: 'Name for the uploaded artifact'
+        required: false
+        type: string
+        default: 'folder-contents-markdown'
+      retention_days:
+        description: 'Number of days to retain the artifact'
+        required: false
+        type: number
+        default: 30
+      excluded_dirs:
+        description: 'Comma-separated list of additional directories to exclude'
+        required: false
+        type: string
+        default: ''
+      excluded_extensions:
+        description: 'Comma-separated list of additional file extensions to exclude (e.g., ".log,.tmp")'
+        required: false
+        type: string
+        default: ''
+      include_file_stats:
+        description: 'Include line count and other file statistics'
+        required: false
+        type: boolean
+        default: true
+      max_file_size_kb:
+        description: 'Maximum file size in KB to include (files larger will be skipped)'
+        required: false
+        type: number
+        default: 500
+    outputs:
+      markdown_file:
+        description: 'The generated markdown filename'
+        value: ${{ jobs.generate-markdown.outputs.markdown_file }}
+      file_count:
+        description: 'Number of files processed'
+        value: ${{ jobs.generate-markdown.outputs.file_count }}
+      skipped_count:
+        description: 'Number of files skipped'
+        value: ${{ jobs.generate-markdown.outputs.skipped_count }}
+      artifact_name:
+        description: 'Name of the uploaded artifact'
+        value: ${{ jobs.generate-markdown.outputs.artifact_name }}
+jobs:
+  generate-markdown:
+    runs-on: ubuntu-latest
+    outputs:
+      markdown_file: ${{ steps.generate.outputs.markdown_file }}
+      file_count: ${{ steps.generate.outputs.file_count }}
+      skipped_count: ${{ steps.generate.outputs.skipped_count }}
+      artifact_name: ${{ inputs.artifact_name }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+    - name: Generate Markdown from folder
+      id: generate
+      env:
+        TARGET_FOLDER: ${{ inputs.target_folder }}
+        OUTPUT_FILENAME: ${{ inputs.output_filename }}
+        EXCLUDED_DIRS: ${{ inputs.excluded_dirs }}
+        EXCLUDED_EXTENSIONS: ${{ inputs.excluded_extensions }}
+        INCLUDE_FILE_STATS: ${{ inputs.include_file_stats }}
+        MAX_FILE_SIZE_KB: ${{ inputs.max_file_size_kb }}
+      run: |
+        python - << 'EOF'
+        import os
+        import sys
+        from datetime import datetime
+        import mimetypes
+
+        # Get configuration from environment variables
+        target_folder = os.environ.get('TARGET_FOLDER', 'src')
+        output_filename = os.environ.get('OUTPUT_FILENAME', '')
+        excluded_dirs_extra = os.environ.get('EXCLUDED_DIRS', '')
+        excluded_extensions_extra = os.environ.get('EXCLUDED_EXTENSIONS', '')
+        include_file_stats = os.environ.get('INCLUDE_FILE_STATS', 'true').lower() == 'true'
+        max_file_size_kb = int(os.environ.get('MAX_FILE_SIZE_KB', '500'))
+        max_file_size_bytes = max_file_size_kb * 1024
+
+        # Check if the folder exists
+        if not os.path.exists(target_folder):
+            print(f"Error: Folder '{target_folder}' does not exist")
+            sys.exit(1)
+
+        # Default excluded directories
+        default_excluded_dirs = {'node_modules', '__pycache__', 'venv', 'env', '.git', 'dist', 'build', 'coverage', '.next', '.nuxt', 'vendor'}
+        
+        # Add user-specified excluded directories
+        if excluded_dirs_extra:
+            user_excluded_dirs = {d.strip() for d in excluded_dirs_extra.split(',') if d.strip()}
+            default_excluded_dirs.update(user_excluded_dirs)
+
+        # Binary file extensions to skip
+        binary_extensions = {
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico', '.svg', '.webp',
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+            '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz',
+            '.exe', '.dll', '.so', '.dylib', '.lib', '.a',
+            '.mp3', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ogg',
+            '.ttf', '.otf', '.woff', '.woff2', '.eot',
+            '.db', '.sqlite', '.sqlite3',
+            '.class', '.jar', '.war', '.ear',
+            '.pyc', '.pyo', '.pyd',
+            '.o', '.obj', '.bin', '.dat',
+            '.lock', '.cache',
+            '.map', '.min.js', '.min.css',
+            '.DS_Store', '.thumbs'
+        }
+
+        # Add user-specified excluded extensions
+        if excluded_extensions_extra:
+            user_excluded_ext = {e.strip().lower() if e.strip().startswith('.') else f'.{e.strip().lower()}' 
+                                for e in excluded_extensions_extra.split(',') if e.strip()}
+            binary_extensions.update(user_excluded_ext)
+
+        # Create the output markdown content
+        markdown_content = f"# Files from `{target_folder}` Directory\n\n"
+        markdown_content += f"> **Purpose:** This document contains the source code from the `{target_folder}` directory, formatted for AI/LLM consumption.\n\n"
+        markdown_content += f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}  \n"
+        markdown_content += f"**Repository:** `{os.environ.get('GITHUB_REPOSITORY', 'Unknown')}`  \n"
+        markdown_content += f"**Branch:** `{os.environ.get('GITHUB_REF_NAME', 'Unknown')}`  \n"
+        markdown_content += f"**Commit:** `{os.environ.get('GITHUB_SHA', 'Unknown')[:7]}`\n\n"
+        markdown_content += "---\n\n"
+
+        # Create table of contents
+        toc_content = "## Table of Contents\n\n"
+        file_entries = []
+        files_content = ""
+
+        # Walk through all files in the directory
+        file_count = 0
+        skipped_count = 0
+        total_lines = 0
+        total_chars = 0
+        skipped_reasons = {}
+
+        for root, dirs, files in os.walk(target_folder):
+            # Skip hidden directories and excluded directories
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in default_excluded_dirs]
+
+            for file in sorted(files):
+                # Skip hidden files
+                if file.startswith('.'):
+                    skipped_reasons['hidden files'] = skipped_reasons.get('hidden files', 0) + 1
+                    skipped_count += 1
+                    continue
+
+                file_path = os.path.join(root, file)
+                relative_path = os.path.relpath(file_path, start='.')
+                file_extension = os.path.splitext(file)[1].lower()
+
+                # Check file size
+                try:
+                    file_size = os.path.getsize(file_path)
+                    if file_size > max_file_size_bytes:
+                        skipped_reasons['file too large'] = skipped_reasons.get('file too large', 0) + 1
+                        skipped_count += 1
+                        continue
+                except OSError:
+                    skipped_reasons['read error'] = skipped_reasons.get('read error', 0) + 1
+                    skipped_count += 1
+                    continue
+
+                # Skip binary files
+                if file_extension in binary_extensions:
+                    skipped_reasons['binary file'] = skipped_reasons.get('binary file', 0) + 1
+                    skipped_count += 1
+                    continue
+
+                # Try to determine if file is binary using mimetypes
+                mime_type, _ = mimetypes.guess_type(file_path)
+                if mime_type and (mime_type.startswith('image/') or 
+                                  mime_type.startswith('video/') or 
+                                  mime_type.startswith('audio/') or
+                                  (mime_type.startswith('application/') and 
+                                   not mime_type.startswith('application/json') and
+                                   not mime_type.startswith('application/xml') and
+                                   not mime_type.startswith('application/javascript'))):
+                    skipped_reasons['binary mime type'] = skipped_reasons.get('binary mime type', 0) + 1
+                    skipped_count += 1
+                    continue
+
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+
+                    # Store file entry for table of contents
+                    file_entries.append(relative_path)
+
+                    # Calculate stats
+                    line_count = content.count('\n') + (1 if content and not content.endswith('\n') else 0)
+                    char_count = len(content)
+                    total_lines += line_count
+                    total_chars += char_count
+
+                    # Add file information to markdown
+                    file_section = f"## File: `{relative_path}`\n\n"
+                    
+                    if include_file_stats:
+                        file_section += f"| Property | Value |\n"
+                        file_section += f"|----------|-------|\n"
+                        file_section += f"| Directory | `{os.path.dirname(relative_path) or '.'}` |\n"
+                        file_section += f"| Filename | `{os.path.basename(file)}` |\n"
+                        file_section += f"| Extension | `{file_extension if file_extension else 'none'}` |\n"
+                        file_section += f"| Lines | {line_count} |\n"
+                        file_section += f"| Characters | {char_count} |\n\n"
+
+                    # Determine the language for syntax highlighting
+                    language_map = {
+                        '.py': 'python',
+                        '.js': 'javascript',
+                        '.ts': 'typescript',
+                        '.jsx': 'jsx',
+                        '.tsx': 'tsx',
+                        '.vue': 'vue',
+                        '.svelte': 'svelte',
+                        '.java': 'java',
+                        '.c': 'c',
+                        '.h': 'c',
+                        '.cpp': 'cpp',
+                        '.hpp': 'cpp',
+                        '.cs': 'csharp',
+                        '.php': 'php',
+                        '.rb': 'ruby',
+                        '.go': 'go',
+                        '.rs': 'rust',
+                        '.swift': 'swift',
+                        '.kt': 'kotlin',
+                        '.kts': 'kotlin',
+                        '.scala': 'scala',
+                        '.r': 'r',
+                        '.sh': 'bash',
+                        '.bash': 'bash',
+                        '.zsh': 'zsh',
+                        '.fish': 'fish',
+                        '.ps1': 'powershell',
+                        '.yaml': 'yaml',
+                        '.yml': 'yaml',
+                        '.json': 'json',
+                        '.jsonc': 'jsonc',
+                        '.xml': 'xml',
+                        '.html': 'html',
+                        '.htm': 'html',
+                        '.css': 'css',
+                        '.scss': 'scss',
+                        '.sass': 'sass',
+                        '.less': 'less',
+                        '.styl': 'stylus',
+                        '.sql': 'sql',
+                        '.md': 'markdown',
+                        '.mdx': 'mdx',
+                        '.tex': 'latex',
+                        '.dockerfile': 'dockerfile',
+                        '.makefile': 'makefile',
+                        '.cmake': 'cmake',
+                        '.gradle': 'gradle',
+                        '.properties': 'properties',
+                        '.ini': 'ini',
+                        '.toml': 'toml',
+                        '.env': 'bash',
+                        '.gitignore': 'gitignore',
+                        '.dockerignore': 'gitignore',
+                        '.editorconfig': 'editorconfig',
+                        '.graphql': 'graphql',
+                        '.gql': 'graphql',
+                        '.proto': 'protobuf',
+                        '.tf': 'hcl',
+                        '.hcl': 'hcl',
+                        '.lua': 'lua',
+                        '.pl': 'perl',
+                        '.pm': 'perl',
+                        '.ex': 'elixir',
+                        '.exs': 'elixir',
+                        '.erl': 'erlang',
+                        '.hrl': 'erlang',
+                        '.clj': 'clojure',
+                        '.cljs': 'clojure',
+                        '.hs': 'haskell',
+                        '.ml': 'ocaml',
+                        '.fs': 'fsharp',
+                        '.fsx': 'fsharp',
+                        '.dart': 'dart',
+                        '.nim': 'nim',
+                        '.zig': 'zig',
+                        '.v': 'v',
+                        '.sol': 'solidity',
+                        '.prisma': 'prisma'
+                    }
+
+                    language = language_map.get(file_extension.lower(), '')
+
+                    # Special case for files without extensions but with specific names
+                    filename_lower = file.lower()
+                    if not file_extension or not language:
+                        name_map = {
+                            'dockerfile': 'dockerfile',
+                            'makefile': 'makefile',
+                            'readme': 'markdown',
+                            'license': 'text',
+                            'changelog': 'markdown',
+                            'gemfile': 'ruby',
+                            'rakefile': 'ruby',
+                            'vagrantfile': 'ruby',
+                            'brewfile': 'ruby',
+                            'procfile': 'yaml',
+                            'cmakelists.txt': 'cmake',
+                            'package.json': 'json',
+                            'tsconfig.json': 'jsonc',
+                            'jsconfig.json': 'jsonc'
+                        }
+                        language = name_map.get(filename_lower, language)
+
+                    # Add the file content in a code block
+                    file_section += f"```{language}\n{content}\n```\n\n"
+                    file_section += "---\n\n"
+
+                    files_content += file_section
+                    file_count += 1
+
+                except UnicodeDecodeError:
+                    skipped_reasons['not UTF-8'] = skipped_reasons.get('not UTF-8', 0) + 1
+                    skipped_count += 1
+                except Exception as e:
+                    skipped_reasons['error'] = skipped_reasons.get('error', 0) + 1
+                    skipped_count += 1
+
+        # Build table of contents with proper anchors
+        for entry in file_entries:
+            # Create anchor that matches GitHub's heading ID generation
+            anchor = entry.lower().replace('/', '').replace('.', '').replace(' ', '-').replace('_', '')
+            toc_content += f"- [`{entry}`](#file-{anchor})\n"
+
+        toc_content += "\n---\n\n"
+
+        # Combine all content
+        final_content = markdown_content + toc_content + files_content
+
+        # Add summary at the end
+        final_content += f"\n## Summary\n\n"
+        final_content += f"### Statistics\n\n"
+        final_content += f"| Metric | Value |\n"
+        final_content += f"|--------|-------|\n"
+        final_content += f"| Files processed | {file_count} |\n"
+        final_content += f"| Files skipped | {skipped_count} |\n"
+        final_content += f"| Total lines | {total_lines:,} |\n"
+        final_content += f"| Total characters | {total_chars:,} |\n"
+        final_content += f"| Target folder | `{target_folder}` |\n\n"
+
+        if skipped_reasons:
+            final_content += f"### Skipped Files Breakdown\n\n"
+            final_content += f"| Reason | Count |\n"
+            final_content += f"|--------|-------|\n"
+            for reason, count in sorted(skipped_reasons.items(), key=lambda x: -x[1]):
+                final_content += f"| {reason} | {count} |\n"
+            final_content += "\n"
+
+        final_content += f"### Configuration\n\n"
+        final_content += f"- **Max file size:** {max_file_size_kb} KB\n"
+        final_content += f"- **Excluded directories:** {', '.join(sorted(default_excluded_dirs))}\n"
+
+        # Generate output filename
+        if output_filename:
+            final_filename = f"{output_filename}.md"
+        else:
+            final_filename = f"{target_folder.replace('/', '_')}_contents.md"
+
+        # Write the markdown file
+        with open(final_filename, 'w', encoding='utf-8') as f:
+            f.write(final_content)
+
+        print(f"Markdown file generated: {final_filename}")
+        print(f"Processed {file_count} files ({total_lines:,} lines, {total_chars:,} characters)")
+        print(f"Skipped {skipped_count} files")
+
+        # Set outputs using GITHUB_OUTPUT
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"markdown_file={final_filename}\n")
+            f.write(f"file_count={file_count}\n")
+            f.write(f"skipped_count={skipped_count}\n")
+            f.write(f"total_lines={total_lines}\n")
+            f.write(f"total_chars={total_chars}\n")
+        EOF
+    - name: Upload Markdown artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ steps.generate.outputs.markdown_file }}
+        retention-days: ${{ inputs.retention_days }}
+    - name: Create summary
+      run: |
+        echo "## Markdown Generation Complete" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Statistics" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Files processed | ${{ steps.generate.outputs.file_count }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Files skipped | ${{ steps.generate.outputs.skipped_count }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Total lines | ${{ steps.generate.outputs.total_lines }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Target folder | \`${{ inputs.target_folder }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Download" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "The markdown file \`${{ steps.generate.outputs.markdown_file }}\` has been uploaded as artifact **\`${{ inputs.artifact_name }}\`**." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Download it from the **Artifacts** section below." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Usage Tip" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Upload this file to your preferred AI/LLM to:" >> $GITHUB_STEP_SUMMARY
+        echo "- Get code reviews and improvement suggestions" >> $GITHUB_STEP_SUMMARY
+        echo "- Generate documentation" >> $GITHUB_STEP_SUMMARY
+        echo "- Refactor or add new features" >> $GITHUB_STEP_SUMMARY
+        echo "- Debug issues with full context" >> $GITHUB_STEP_SUMMARY
