@@ -32,7 +32,20 @@ on:
         type: string
         default: 'plattar.com'
       # -----------------------------------------------------------------------
-      # Build Configuration
+      # Deploy Mode Configuration
+      # -----------------------------------------------------------------------
+      deploy-mode:
+        description: 'Deployment mode: "build" (compile first) or "static" (pre-built files)'
+        required: false
+        type: string
+        default: 'build'
+      static-source-directory:
+        description: 'Source directory for static files (only used when deploy-mode is "static")'
+        required: false
+        type: string
+        default: '.'
+      # -----------------------------------------------------------------------
+      # Build Configuration (only used when deploy-mode is "build")
       # -----------------------------------------------------------------------
       build-directory:
         description: 'Directory containing package.json'
@@ -72,10 +85,10 @@ on:
     outputs:
       version:
         description: 'Deployed version number'
-        value: ${{ jobs.build.outputs.version }}
+        value: ${{ jobs.prepare.outputs.version }}
       environment:
         description: 'Target environment'
-        value: ${{ jobs.build.outputs.environment }}
+        value: ${{ jobs.prepare.outputs.environment }}
       deployment-url:
         description: 'Primary deployment URL'
         value: ${{ jobs.deploy.outputs.deployment-url }}
@@ -85,10 +98,10 @@ on:
 
 jobs:
   # ===========================================================================
-  # Build Job
+  # Prepare Job - Parse parameters and determine deployment strategy
   # ===========================================================================
-  build:
-    name: Build Application
+  prepare:
+    name: Prepare Deployment
     runs-on: ubuntu-latest
     outputs:
       tag-name: ${{ steps.parse.outputs.tag }}
@@ -96,12 +109,14 @@ jobs:
       environment: ${{ steps.parse.outputs.environment }}
       artifact-name: ${{ steps.parse.outputs.artifact-name }}
       should-deploy: ${{ steps.parse.outputs.should-deploy }}
+      deploy-mode: ${{ steps.parse.outputs.deploy-mode }}
     steps:
       - name: Parse deployment parameters
         id: parse
         run: |
           TAG_NAME="${{ inputs.tag }}"
           TRIGGER_TYPE="${{ inputs.trigger-type }}"
+          DEPLOY_MODE="${{ inputs.deploy-mode }}"
           
           if [[ "$TRIGGER_TYPE" == "manual" ]]; then
             VERSION="${TAG_NAME}"
@@ -140,9 +155,11 @@ jobs:
           echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
           echo "artifact-name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
           echo "should-deploy=${SHOULD_DEPLOY}" >> $GITHUB_OUTPUT
-      - name: Generate build summary
+          echo "deploy-mode=${DEPLOY_MODE}" >> $GITHUB_OUTPUT
+
+      - name: Generate preparation summary
         run: |
-          echo "## Build Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "## Deployment Configuration" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
@@ -150,50 +167,126 @@ jobs:
           echo "| Tag | \`${{ steps.parse.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Version | \`${{ steps.parse.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Trigger | \`${{ inputs.trigger-type }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy Mode | \`${{ steps.parse.outputs.deploy-mode }}\` |" >> $GITHUB_STEP_SUMMARY
           if [[ "${{ steps.parse.outputs.should-deploy }}" == "true" ]]; then
             echo "| Environment | \`${{ steps.parse.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
-            echo "| Action | Build and Deploy |" >> $GITHUB_STEP_SUMMARY
+            if [[ "${{ steps.parse.outputs.deploy-mode }}" == "static" ]]; then
+              echo "| Source | \`${{ inputs.static-source-directory }}\` |" >> $GITHUB_STEP_SUMMARY
+              echo "| Action | Deploy Static Files |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| Action | Build and Deploy |" >> $GITHUB_STEP_SUMMARY
+            fi
           else
-            echo "| Action | Build Only |" >> $GITHUB_STEP_SUMMARY
+            if [[ "${{ steps.parse.outputs.deploy-mode }}" == "static" ]]; then
+              echo "| Action | Package Static Files Only |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| Action | Build Only |" >> $GITHUB_STEP_SUMMARY
+            fi
           fi
+
+  # ===========================================================================
+  # Build Job - Compile application (only runs when deploy-mode is "build")
+  # ===========================================================================
+  build:
+    name: Build Application
+    needs: prepare
+    runs-on: ubuntu-latest
+    if: needs.prepare.outputs.deploy-mode == 'build'
+    outputs:
+      artifact-name: ${{ needs.prepare.outputs.artifact-name }}
+    steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.parse.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.tag-name }}
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
+
       - name: Build application
         working-directory: ${{ inputs.build-directory }}
         run: ${{ inputs.build-command }}
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.parse.outputs.artifact-name }}
+          name: ${{ needs.prepare.outputs.artifact-name }}
           path: ${{ inputs.build-directory }}/${{ inputs.output-directory }}
           retention-days: ${{ inputs.artifact-retention-days }}
           if-no-files-found: error
+
+  # ===========================================================================
+  # Package Static Job - Package pre-built files (only runs when deploy-mode is "static")
+  # ===========================================================================
+  package-static:
+    name: Package Static Files
+    needs: prepare
+    runs-on: ubuntu-latest
+    if: needs.prepare.outputs.deploy-mode == 'static'
+    outputs:
+      artifact-name: ${{ needs.prepare.outputs.artifact-name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag-name }}
+
+      - name: Verify static source directory
+        run: |
+          SOURCE_DIR="${{ inputs.static-source-directory }}"
+          
+          if [[ ! -d "$SOURCE_DIR" ]]; then
+            echo "ERROR: Static source directory does not exist: $SOURCE_DIR"
+            exit 1
+          fi
+          
+          FILE_COUNT=$(find "$SOURCE_DIR" -type f | wc -l)
+          
+          if [[ "$FILE_COUNT" -eq 0 ]]; then
+            echo "ERROR: Static source directory is empty: $SOURCE_DIR"
+            exit 1
+          fi
+          
+          echo "Found $FILE_COUNT files in $SOURCE_DIR"
+          echo ""
+          echo "Directory structure (first 3 levels):"
+          find "$SOURCE_DIR" -maxdepth 3 -type d | head -20
+
+      - name: Upload static artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact-name }}
+          path: ${{ inputs.static-source-directory }}
+          retention-days: ${{ inputs.artifact-retention-days }}
+          if-no-files-found: error
+
   # ===========================================================================
   # Deploy Job
   # ===========================================================================
   deploy:
-    name: Deploy to ${{ needs.build.outputs.environment }}
-    needs: build
+    name: Deploy to ${{ needs.prepare.outputs.environment }}
+    needs: [prepare, build, package-static]
     runs-on: ubuntu-latest
-    if: needs.build.outputs.should-deploy == 'true'
+    # Run if should-deploy is true AND at least one of build or package-static succeeded
+    if: |
+      always() &&
+      needs.prepare.outputs.should-deploy == 'true' &&
+      (needs.build.result == 'success' || needs.package-static.result == 'success') &&
+      needs.prepare.result == 'success'
     outputs:
       deployment-url: ${{ steps.config.outputs.pages-url }}
       version-url: ${{ steps.urls.outputs.version-url }}
     environment:
-      name: ${{ needs.build.outputs.environment }}
+      name: ${{ needs.prepare.outputs.environment }}
       url: ${{ steps.config.outputs.pages-url }}
     steps:
       - name: Configure deployment parameters
         id: config
         run: |
           PROJECT_NAME="${{ inputs.project-name }}"
-          ENVIRONMENT="${{ needs.build.outputs.environment }}"
+          ENVIRONMENT="${{ needs.prepare.outputs.environment }}"
           DOMAIN_SUFFIX="${{ inputs.domain-suffix }}"
           
           if [[ "$ENVIRONMENT" == "production" ]]; then
@@ -207,43 +300,50 @@ jobs:
           echo "cloudflare-project=${CF_PROJECT}" >> $GITHUB_OUTPUT
           echo "custom-domain=${CUSTOM_DOMAIN}" >> $GITHUB_OUTPUT
           echo "pages-url=https://${CF_PROJECT}.pages.dev" >> $GITHUB_OUTPUT
-      - name: Download build artifacts
+
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.build.outputs.artifact-name }}
+          name: ${{ needs.prepare.outputs.artifact-name }}
           path: ./deploy
+
       - name: Deploy version branch
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy ./deploy --project-name ${{ steps.config.outputs.cloudflare-project }} --branch ${{ needs.build.outputs.version }}
+          command: pages deploy ./deploy --project-name ${{ steps.config.outputs.cloudflare-project }} --branch ${{ needs.prepare.outputs.version }}
+
       - name: Deploy production branch
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy ./deploy --project-name ${{ steps.config.outputs.cloudflare-project }} --branch main
+
       - name: Calculate URLs
         id: urls
         run: |
-          VERSION="${{ needs.build.outputs.version }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           CF_PROJECT="${{ steps.config.outputs.cloudflare-project }}"
           echo "version-url=https://${VERSION}.${CF_PROJECT}.pages.dev" >> $GITHUB_OUTPUT
+
       - name: Generate deployment summary
         run: |
-          VERSION="${{ needs.build.outputs.version }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           CF_PROJECT="${{ steps.config.outputs.cloudflare-project }}"
           PAGES_URL="${{ steps.config.outputs.pages-url }}"
           VERSION_URL="${{ steps.urls.outputs.version-url }}"
           CUSTOM_DOMAIN="${{ steps.config.outputs.custom-domain }}"
+          DEPLOY_MODE="${{ needs.prepare.outputs.deploy-mode }}"
           
           echo "## Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Version | \`${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | \`${{ needs.build.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`${{ needs.prepare.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy Mode | \`${DEPLOY_MODE}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Cloudflare Project | \`${CF_PROJECT}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Deployment URLs" >> $GITHUB_STEP_SUMMARY
@@ -253,17 +353,19 @@ jobs:
           echo "| Custom Domain | [${CUSTOM_DOMAIN}](https://${CUSTOM_DOMAIN}) |" >> $GITHUB_STEP_SUMMARY
           echo "| Pages URL | [${CF_PROJECT}.pages.dev](${PAGES_URL}) |" >> $GITHUB_STEP_SUMMARY
           echo "| Version URL | [${VERSION}.${CF_PROJECT}.pages.dev](${VERSION_URL}) |" >> $GITHUB_STEP_SUMMARY
+
       - name: Update GitHub Release
         uses: actions/github-script@v7
         with:
           script: |
-            const version = '${{ needs.build.outputs.version }}';
-            const environment = '${{ needs.build.outputs.environment }}';
+            const version = '${{ needs.prepare.outputs.version }}';
+            const environment = '${{ needs.prepare.outputs.environment }}';
             const customDomain = '${{ steps.config.outputs.custom-domain }}';
             const pagesUrl = '${{ steps.config.outputs.pages-url }}';
             const cfProject = '${{ steps.config.outputs.cloudflare-project }}';
             const versionUrl = '${{ steps.urls.outputs.version-url }}';
             const deploymentType = '${{ inputs.trigger-type }}' === 'manual' ? 'Manual' : 'Automatic';
+            const deployMode = '${{ needs.prepare.outputs.deploy-mode }}';
             const timestamp = new Date().toISOString().split('T')[0];
             
             try {
@@ -293,7 +395,8 @@ jobs:
               }
               
               const currentBody = release.data.body || '';
-              const deploymentEntry = `- **${environment}** (${deploymentType}): [${customDomain}](https://${customDomain}) | [Pages](${pagesUrl}) | [Version](${versionUrl}) - ${timestamp}`;
+              const modeLabel = deployMode === 'static' ? ' (Static)' : '';
+              const deploymentEntry = `- **${environment}**${modeLabel} (${deploymentType}): [${customDomain}](https://${customDomain}) | [Pages](${pagesUrl}) | [Version](${versionUrl}) - ${timestamp}`;
               
               const envPattern = new RegExp(`- \\*\\*${environment}\\*\\*.*`, 'g');
               let updatedBody;

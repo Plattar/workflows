@@ -1,6 +1,6 @@
 # Cloudflare Pages Deploy
 
-Builds and deploys applications to Cloudflare Pages with multi-environment support.
+Builds and deploys applications to Cloudflare Pages with multi-environment support. Supports both compiled applications and pre-built static files.
 
 ## Reference
 
@@ -12,9 +12,15 @@ uses: Plattar/workflows/.github/workflows/cloudflare-pages-deploy.yml@main
 
 This workflow provides automated deployments to Cloudflare Pages with support for staging, review, and production environments. It can be triggered by tag pushes or manual workflow dispatch.
 
-## Caller Workflow
+**Deploy Modes:**
+- **Build Mode** (default): Compiles your application using npm/node before deployment
+- **Static Mode**: Deploys pre-built static files directly without a build step
 
-Create `.github/workflows/deploy.yml` in your repository:
+## Caller Workflow Examples
+
+### Standard Build Deployment
+
+Create `.github/workflows/deploy.yml` for projects that need compilation:
 
 ```yaml
 name: Deploy
@@ -51,6 +57,7 @@ jobs:
       environment: ${{ github.event.inputs.environment || '' }}
       trigger-type: ${{ github.event_name == 'workflow_dispatch' && 'manual' || 'tag-push' }}
       project-name: 'your-project-name'
+      deploy-mode: 'build'
       build-directory: '.'
       output-directory: 'dist'
       build-command: 'npm run build'
@@ -58,6 +65,110 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 ```
+
+### Static Files Deployment
+
+Create `.github/workflows/deploy.yml` for deploying pre-built static files:
+
+```yaml
+name: Deploy Static
+on:
+  push:
+    tags:
+      - '*-staging'
+      - '*-production'
+      - '*-review'
+      - '*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to deploy (e.g., 1.0.0)'
+        required: true
+        type: string
+      environment:
+        description: 'Target deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+          - review
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'auto' }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    uses: Plattar/workflows/.github/workflows/cloudflare-pages-deploy.yml@main
+    with:
+      tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+      environment: ${{ github.event.inputs.environment || '' }}
+      trigger-type: ${{ github.event_name == 'workflow_dispatch' && 'manual' || 'tag-push' }}
+      project-name: 'your-static-site'
+      deploy-mode: 'static'
+      static-source-directory: 'themes'
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+```
+
+## Static Files Deployment
+
+When using `deploy-mode: 'static'`, the workflow deploys pre-built files directly to Cloudflare Pages without running any build commands.
+
+### Directory Structure Preservation
+
+The entire contents of `static-source-directory` are deployed, preserving the full directory structure. For example:
+
+**Repository structure:**
+```
+your-repo/
+├── themes/
+│   ├── webxr/
+│   │   └── www/
+│   │       ├── index.html
+│   │       ├── styles.css
+│   │       └── app.js
+│   └── default/
+│       └── www/
+│           └── index.html
+└── README.md
+```
+
+**With configuration:**
+```yaml
+static-source-directory: 'themes'
+```
+
+**Results in URLs:**
+- `https://your-domain.com/webxr/www/index.html`
+- `https://your-domain.com/webxr/www/styles.css`
+- `https://your-domain.com/webxr/www/app.js`
+- `https://your-domain.com/default/www/index.html`
+
+### Root-Level Static Deployment
+
+To deploy static files at the root (no subdirectory):
+
+```yaml
+static-source-directory: 'public'
+```
+
+**Repository structure:**
+```
+your-repo/
+├── public/
+│   ├── index.html
+│   ├── styles.css
+│   └── assets/
+│       └── logo.png
+└── README.md
+```
+
+**Results in URLs:**
+- `https://your-domain.com/index.html`
+- `https://your-domain.com/styles.css`
+- `https://your-domain.com/assets/logo.png`
 
 ## Required Secrets
 
@@ -77,6 +188,8 @@ Configure these in your repository under **Settings > Secrets and Variables > Ac
 
 ## Inputs
 
+### Deployment Parameters
+
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `tag` | Yes | — | Tag to deploy |
@@ -84,10 +197,27 @@ Configure these in your repository under **Settings > Secrets and Variables > Ac
 | `project-name` | Yes | — | Cloudflare Pages project name |
 | `environment` | No | — | Target environment: `staging`, `review`, or `production` |
 | `domain-suffix` | No | `plattar.com` | Domain suffix for custom domains |
+
+### Deploy Mode Configuration
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `deploy-mode` | No | `build` | Deployment mode: `build` or `static` |
+| `static-source-directory` | No | `.` | Source directory for static files (only used when `deploy-mode` is `static`) |
+
+### Build Configuration (only used when `deploy-mode` is `build`)
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
 | `build-directory` | No | `.` | Directory containing package.json |
 | `output-directory` | No | `build` | Build output path |
 | `build-command` | No | `npm run clean:build` | Build command to execute |
 | `node-version` | No | `latest` | Node.js version |
+
+### Artifact Configuration
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
 | `artifact-retention-days` | No | `120` | Days to retain build artifacts |
 
 ## Tag Conventions
@@ -96,21 +226,21 @@ The workflow determines the deployment target based on tag suffix:
 
 | Tag Format | Action |
 |------------|--------|
-| `1.0.0` | Build only (no deployment) |
-| `1.0.0-staging` | Build and deploy to staging |
-| `1.0.0-review` | Build and deploy to review |
-| `1.0.0-production` | Build and deploy to production |
+| `1.0.0` | Build/package only (no deployment) |
+| `1.0.0-staging` | Build/package and deploy to staging |
+| `1.0.0-review` | Build/package and deploy to review |
+| `1.0.0-production` | Build/package and deploy to production |
 
 ## Examples
 
-### Deploy to Staging
+### Deploy Static Files to Staging
 
 ```bash
 git tag 1.0.0-staging
 git push origin 1.0.0-staging
 ```
 
-### Deploy to Production
+### Deploy Static Files to Production
 
 ```bash
 git tag 1.0.0-production
@@ -133,8 +263,16 @@ Ensure the `project-name` matches your Cloudflare Pages project exactly (case-se
 
 ### Deployment Succeeds but Site Not Updated
 
-Check the `output-directory` matches your build tool's output path.
+Check the `output-directory` (build mode) or `static-source-directory` (static mode) matches your actual file paths.
 
 ### Permission Denied Errors
 
 Verify your `CLOUDFLARE_API_TOKEN` has the correct permissions for Cloudflare Pages deployments.
+
+### Static Source Directory Not Found
+
+Ensure the `static-source-directory` path exists in your repository and is relative to the repository root. The workflow will fail with a descriptive error if the directory doesn't exist or is empty.
+
+### Files Not at Expected URLs
+
+Remember that the entire contents of `static-source-directory` are deployed. If you set `static-source-directory: 'themes'` and have `themes/webxr/www/index.html`, the URL will be `{domain}/webxr/www/index.html`, not `{domain}/themes/webxr/www/index.html`.
