@@ -120,6 +120,12 @@ jobs:
           TRIGGER_TYPE="${{ inputs.trigger-type }}"
           DEPLOY_MODE="${{ inputs.deploy-mode }}"
           
+          echo "::group::Parsing Deployment Configuration"
+          echo "Tag: ${TAG_NAME}"
+          echo "Trigger Type: ${TRIGGER_TYPE}"
+          echo "Deploy Mode: ${DEPLOY_MODE}"
+          echo "::endgroup::"
+          
           if [[ "$TRIGGER_TYPE" == "manual" ]]; then
             VERSION="${TAG_NAME}"
             ENVIRONMENT="${{ inputs.environment }}"
@@ -130,7 +136,7 @@ jobs:
             fi
           else
             # Parse tag to extract version and environment
-            if [[ "$TAG_NAME" =~ ^(.+)-(staging|production|review|all)$ ]]; then
+            if [[ "$TAG_NAME" =~ ^([0-9]+\.[0-9]+\.[0-9]+.*?)-(staging|production|review|all)$ ]]; then
               VERSION="${BASH_REMATCH[1]}"
               ENVIRONMENT="${BASH_REMATCH[2]}"
               SHOULD_DEPLOY="true"
@@ -139,13 +145,13 @@ jobs:
               ENVIRONMENT=""
               SHOULD_DEPLOY="false"
             else
-              echo "ERROR: Invalid tag format: $TAG_NAME"
+              echo "::error title=Invalid Tag Format::Tag '${TAG_NAME}' does not match expected format"
               echo ""
-              echo "Expected formats:"
-              echo "  {version}            - Build only (e.g., 1.2.0)"
-              echo "  {version}-staging    - Deploy to staging"
-              echo "  {version}-production - Deploy to production"
-              echo "  {version}-review     - Deploy to review"
+              echo "Expected tag formats:"
+              echo "  {version}            - Build only (example: 1.2.0)"
+              echo "  {version}-staging    - Deploy to staging environment"
+              echo "  {version}-production - Deploy to production environment"
+              echo "  {version}-review     - Deploy to review environment"
               echo "  {version}-all        - Deploy to all environments"
               exit 1
             fi
@@ -155,14 +161,20 @@ jobs:
           DEPLOY_ALL="false"
           if [[ "$ENVIRONMENT" == "all" ]]; then
             DEPLOY_ALL="true"
-            # Create matrix for all environments
             ENVIRONMENT_MATRIX='["production","staging","review"]'
           else
-            # Single environment matrix
             ENVIRONMENT_MATRIX="[\"${ENVIRONMENT}\"]"
           fi
           
           ARTIFACT_NAME="build-${{ inputs.project-name }}-${VERSION}"
+          
+          echo "::group::Configuration Results"
+          echo "Version: ${VERSION}"
+          echo "Environment: ${ENVIRONMENT:-none}"
+          echo "Should Deploy: ${SHOULD_DEPLOY}"
+          echo "Deploy All: ${DEPLOY_ALL}"
+          echo "Artifact Name: ${ARTIFACT_NAME}"
+          echo "::endgroup::"
           
           echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
@@ -173,34 +185,47 @@ jobs:
           echo "deploy-all=${DEPLOY_ALL}" >> $GITHUB_OUTPUT
           echo "environment-matrix=${ENVIRONMENT_MATRIX}" >> $GITHUB_OUTPUT
 
-      - name: Generate preparation summary
+      - name: Generate deployment summary
         run: |
-          echo "## Deployment Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Project | \`${{ inputs.project-name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Tag | \`${{ steps.parse.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Version | \`${{ steps.parse.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Trigger | \`${{ inputs.trigger-type }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Deploy Mode | \`${{ steps.parse.outputs.deploy-mode }}\` |" >> $GITHUB_STEP_SUMMARY
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ## Deployment Configuration
+          
+          ### Configuration Parameters
+          
+          | Parameter | Value |
+          |-----------|-------|
+          | Project | `${{ inputs.project-name }}` |
+          | Tag | `${{ steps.parse.outputs.tag }}` |
+          | Version | `${{ steps.parse.outputs.version }}` |
+          | Trigger Method | `${{ inputs.trigger-type }}` |
+          | Deploy Mode | `${{ steps.parse.outputs.deploy-mode }}` |
+          EOF
+          
           if [[ "${{ steps.parse.outputs.should-deploy }}" == "true" ]]; then
             if [[ "${{ steps.parse.outputs.deploy-all }}" == "true" ]]; then
-              echo "| Environments | \`production, staging, review\` |" >> $GITHUB_STEP_SUMMARY
+              echo "| Target Environments | \`production\`, \`staging\`, \`review\` |" >> $GITHUB_STEP_SUMMARY
             else
-              echo "| Environment | \`${{ steps.parse.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+              echo "| Target Environment | \`${{ steps.parse.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
             fi
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Deployment Action" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
             if [[ "${{ steps.parse.outputs.deploy-mode }}" == "static" ]]; then
-              echo "| Source | \`${{ inputs.static-source-directory }}\` |" >> $GITHUB_STEP_SUMMARY
-              echo "| Action | Deploy Static Files |" >> $GITHUB_STEP_SUMMARY
+              echo "**Operation**: Deploy static files from \`${{ inputs.static-source-directory }}\`" >> $GITHUB_STEP_SUMMARY
             else
-              echo "| Action | Build and Deploy |" >> $GITHUB_STEP_SUMMARY
+              echo "**Operation**: Build application and deploy artifacts" >> $GITHUB_STEP_SUMMARY
             fi
           else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Build Action" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
             if [[ "${{ steps.parse.outputs.deploy-mode }}" == "static" ]]; then
-              echo "| Action | Package Static Files Only |" >> $GITHUB_STEP_SUMMARY
+              echo "**Operation**: Package static files only (no deployment)" >> $GITHUB_STEP_SUMMARY
             else
-              echo "| Action | Build Only |" >> $GITHUB_STEP_SUMMARY
+              echo "**Operation**: Build application only (no deployment)" >> $GITHUB_STEP_SUMMARY
             fi
           fi
 
@@ -220,14 +245,58 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.tag-name }}
 
-      - name: Setup Node.js
+      - name: Setup Node.js environment
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.build-directory }}/package-lock.json
 
-      - name: Build application
+      - name: Install dependencies
         working-directory: ${{ inputs.build-directory }}
-        run: ${{ inputs.build-command }}
+        run: |
+          echo "::group::Installing Node.js dependencies"
+          npm ci
+          echo "::endgroup::"
+
+      - name: Execute build command
+        working-directory: ${{ inputs.build-directory }}
+        run: |
+          echo "::group::Building application"
+          echo "Build Command: ${{ inputs.build-command }}"
+          echo "Output Directory: ${{ inputs.output-directory }}"
+          ${{ inputs.build-command }}
+          echo "::endgroup::"
+
+      - name: Verify build output
+        working-directory: ${{ inputs.build-directory }}
+        run: |
+          OUTPUT_DIR="${{ inputs.output-directory }}"
+          
+          if [[ ! -d "$OUTPUT_DIR" ]]; then
+            echo "::error title=Build Output Missing::Expected build output directory not found: ${OUTPUT_DIR}"
+            echo "::group::Available directories"
+            ls -la
+            echo "::endgroup::"
+            exit 1
+          fi
+          
+          FILE_COUNT=$(find "$OUTPUT_DIR" -type f | wc -l)
+          
+          if [[ "$FILE_COUNT" -eq 0 ]]; then
+            echo "::error title=Empty Build Output::Build output directory contains no files: ${OUTPUT_DIR}"
+            exit 1
+          fi
+          
+          OUTPUT_SIZE=$(du -sh "$OUTPUT_DIR" | cut -f1)
+          
+          echo "::group::Build Verification Results"
+          echo "Output Directory: ${OUTPUT_DIR}"
+          echo "File Count: ${FILE_COUNT}"
+          echo "Total Size: ${OUTPUT_SIZE}"
+          echo "::endgroup::"
+          
+          echo "::notice title=Build Complete::Successfully built ${FILE_COUNT} files (${OUTPUT_SIZE})"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -236,6 +305,26 @@ jobs:
           path: ${{ inputs.build-directory }}/${{ inputs.output-directory }}
           retention-days: ${{ inputs.artifact-retention-days }}
           if-no-files-found: error
+          compression-level: 6
+
+      - name: Generate build summary
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ## Build Results
+          
+          ### Build Information
+          
+          | Metric | Value |
+          |--------|-------|
+          | Version | `${{ needs.prepare.outputs.version }}` |
+          | Node Version | `${{ inputs.node-version }}` |
+          | Build Command | `${{ inputs.build-command }}` |
+          | Output Directory | `${{ inputs.output-directory }}` |
+          | Artifact Name | `${{ needs.prepare.outputs.artifact-name }}` |
+          | Retention Period | `${{ inputs.artifact-retention-days }}` days |
+          
+          **Status**: Build completed successfully
+          EOF
 
   # ===========================================================================
   # Package Static Job - Package pre-built files (only runs when deploy-mode is "static")
@@ -257,22 +346,33 @@ jobs:
         run: |
           SOURCE_DIR="${{ inputs.static-source-directory }}"
           
+          echo "::group::Verifying Static Source Directory"
+          echo "Source Directory: ${SOURCE_DIR}"
+          
           if [[ ! -d "$SOURCE_DIR" ]]; then
-            echo "ERROR: Static source directory does not exist: $SOURCE_DIR"
+            echo "::endgroup::"
+            echo "::error title=Directory Not Found::Static source directory does not exist: ${SOURCE_DIR}"
+            echo ""
+            echo "Available directories in repository root:"
+            ls -la
             exit 1
           fi
           
           FILE_COUNT=$(find "$SOURCE_DIR" -type f | wc -l)
           
           if [[ "$FILE_COUNT" -eq 0 ]]; then
-            echo "ERROR: Static source directory is empty: $SOURCE_DIR"
+            echo "::endgroup::"
+            echo "::error title=Empty Directory::Static source directory contains no files: ${SOURCE_DIR}"
             exit 1
           fi
           
-          echo "Found $FILE_COUNT files in $SOURCE_DIR"
-          echo ""
-          echo "Directory structure (first 3 levels):"
-          find "$SOURCE_DIR" -maxdepth 3 -type d | head -20
+          SOURCE_SIZE=$(du -sh "$SOURCE_DIR" | cut -f1)
+          
+          echo "File Count: ${FILE_COUNT}"
+          echo "Total Size: ${SOURCE_SIZE}"
+          echo "::endgroup::"
+          
+          echo "::notice title=Verification Complete::Found ${FILE_COUNT} files (${SOURCE_SIZE}) in ${SOURCE_DIR}"
 
       - name: Upload static artifacts
         uses: actions/upload-artifact@v4
@@ -281,6 +381,24 @@ jobs:
           path: ${{ inputs.static-source-directory }}
           retention-days: ${{ inputs.artifact-retention-days }}
           if-no-files-found: error
+          compression-level: 6
+
+      - name: Generate packaging summary
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ## Static Files Packaged
+          
+          ### Package Information
+          
+          | Metric | Value |
+          |--------|-------|
+          | Version | `${{ needs.prepare.outputs.version }}` |
+          | Source Directory | `${{ inputs.static-source-directory }}` |
+          | Artifact Name | `${{ needs.prepare.outputs.artifact-name }}` |
+          | Retention Period | `${{ inputs.artifact-retention-days }}` days |
+          
+          **Status**: Static files packaged successfully
+          EOF
 
   # ===========================================================================
   # Deploy Job - Matrix deployment to one or more environments
@@ -289,22 +407,17 @@ jobs:
     name: Deploy to ${{ matrix.environment }}
     needs: [prepare, build, package-static]
     runs-on: ubuntu-latest
-    # Run if should-deploy is true AND at least one of build or package-static succeeded
+    timeout-minutes: 15
     if: |
       always() &&
       needs.prepare.outputs.should-deploy == 'true' &&
       (needs.build.result == 'success' || needs.package-static.result == 'success') &&
       needs.prepare.result == 'success'
     strategy:
-      # Deploy to environments in parallel
       max-parallel: 3
       fail-fast: false
       matrix:
         environment: ${{ fromJSON(needs.prepare.outputs.environment-matrix) }}
-    outputs:
-      deployment-url-production: ${{ steps.output.outputs.deployment-url-production }}
-      deployment-url-staging: ${{ steps.output.outputs.deployment-url-staging }}
-      deployment-url-review: ${{ steps.output.outputs.deployment-url-review }}
     environment:
       name: ${{ matrix.environment }}
       url: ${{ steps.config.outputs.pages-url }}
@@ -316,6 +429,11 @@ jobs:
           ENVIRONMENT="${{ matrix.environment }}"
           DOMAIN_SUFFIX="${{ inputs.domain-suffix }}"
           
+          echo "::group::Deployment Configuration"
+          echo "Environment: ${ENVIRONMENT}"
+          echo "Project Name: ${PROJECT_NAME}"
+          echo "Domain Suffix: ${DOMAIN_SUFFIX}"
+          
           if [[ "$ENVIRONMENT" == "production" ]]; then
             CF_PROJECT="${PROJECT_NAME}"
             CUSTOM_DOMAIN="${PROJECT_NAME}.${DOMAIN_SUFFIX}"
@@ -324,17 +442,43 @@ jobs:
             CUSTOM_DOMAIN="${PROJECT_NAME}-${ENVIRONMENT}.${DOMAIN_SUFFIX}"
           fi
           
+          PAGES_URL="https://${CF_PROJECT}.pages.dev"
+          
+          echo "Cloudflare Project: ${CF_PROJECT}"
+          echo "Custom Domain: ${CUSTOM_DOMAIN}"
+          echo "Pages URL: ${PAGES_URL}"
+          echo "::endgroup::"
+          
           echo "cloudflare-project=${CF_PROJECT}" >> $GITHUB_OUTPUT
           echo "custom-domain=${CUSTOM_DOMAIN}" >> $GITHUB_OUTPUT
-          echo "pages-url=https://${CF_PROJECT}.pages.dev" >> $GITHUB_OUTPUT
+          echo "pages-url=${PAGES_URL}" >> $GITHUB_OUTPUT
 
-      - name: Download artifacts
+      - name: Download deployment artifacts
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.prepare.outputs.artifact-name }}
           path: ./deploy
 
+      - name: Verify artifacts
+        run: |
+          echo "::group::Artifact Verification"
+          FILE_COUNT=$(find ./deploy -type f | wc -l)
+          DEPLOY_SIZE=$(du -sh ./deploy | cut -f1)
+          
+          echo "Files to Deploy: ${FILE_COUNT}"
+          echo "Total Size: ${DEPLOY_SIZE}"
+          echo "::endgroup::"
+          
+          if [[ "$FILE_COUNT" -eq 0 ]]; then
+            echo "::error title=No Files to Deploy::Artifact contains no files"
+            exit 1
+          fi
+          
+          echo "::notice title=Artifacts Ready::Prepared ${FILE_COUNT} files (${DEPLOY_SIZE}) for deployment"
+
       - name: Deploy version branch
+        id: deploy-version
+        timeout-minutes: 5
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -342,27 +486,44 @@ jobs:
           command: pages deploy ./deploy --project-name ${{ steps.config.outputs.cloudflare-project }} --branch ${{ needs.prepare.outputs.version }}
 
       - name: Deploy production branch
+        id: deploy-main
+        timeout-minutes: 5
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy ./deploy --project-name ${{ steps.config.outputs.cloudflare-project }} --branch main
 
-      - name: Calculate URLs
+      - name: Calculate deployment URLs
         id: urls
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
           CF_PROJECT="${{ steps.config.outputs.cloudflare-project }}"
-          echo "version-url=https://${VERSION}.${CF_PROJECT}.pages.dev" >> $GITHUB_OUTPUT
-
-      - name: Set job outputs
-        id: output
-        run: |
-          ENVIRONMENT="${{ matrix.environment }}"
-          PAGES_URL="${{ steps.config.outputs.pages-url }}"
+          VERSION_URL="https://${VERSION}.${CF_PROJECT}.pages.dev"
           
-          # Set environment-specific output
-          echo "deployment-url-${ENVIRONMENT}=${PAGES_URL}" >> $GITHUB_OUTPUT
+          echo "version-url=${VERSION_URL}" >> $GITHUB_OUTPUT
+
+      - name: Save deployment metadata
+        run: |
+          mkdir -p deployment-results
+          cat > deployment-results/${{ matrix.environment }}.json << EOF
+          {
+            "environment": "${{ matrix.environment }}",
+            "version": "${{ needs.prepare.outputs.version }}",
+            "cloudflare_project": "${{ steps.config.outputs.cloudflare-project }}",
+            "custom_domain": "${{ steps.config.outputs.custom-domain }}",
+            "pages_url": "${{ steps.config.outputs.pages-url }}",
+            "version_url": "${{ steps.urls.outputs.version-url }}",
+            "deployed_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+
+      - name: Upload deployment metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-metadata-${{ matrix.environment }}
+          path: deployment-results/
+          retention-days: 90
 
       - name: Generate deployment summary
         run: |
@@ -374,22 +535,28 @@ jobs:
           DEPLOY_MODE="${{ needs.prepare.outputs.deploy-mode }}"
           ENVIRONMENT="${{ matrix.environment }}"
           
-          echo "## Deployment Complete: ${ENVIRONMENT}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Version | \`${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | \`${ENVIRONMENT}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Deploy Mode | \`${DEPLOY_MODE}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Cloudflare Project | \`${CF_PROJECT}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Deployment URLs" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Type | URL |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| Custom Domain | [${CUSTOM_DOMAIN}](https://${CUSTOM_DOMAIN}) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Pages URL | [${CF_PROJECT}.pages.dev](${PAGES_URL}) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Version URL | [${VERSION}.${CF_PROJECT}.pages.dev](${VERSION_URL}) |" >> $GITHUB_STEP_SUMMARY
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## Deployment Complete: ${ENVIRONMENT}
+          
+          ### Deployment Details
+          
+          | Parameter | Value |
+          |-----------|-------|
+          | Version | \`${VERSION}\` |
+          | Environment | \`${ENVIRONMENT}\` |
+          | Deploy Mode | \`${DEPLOY_MODE}\` |
+          | Cloudflare Project | \`${CF_PROJECT}\` |
+          
+          ### Deployment URLs
+          
+          | Type | URL |
+          |------|-----|
+          | Custom Domain | [\`${CUSTOM_DOMAIN}\`](https://${CUSTOM_DOMAIN}) |
+          | Pages URL | [\`${CF_PROJECT}.pages.dev\`](${PAGES_URL}) |
+          | Version URL | [\`${VERSION}.${CF_PROJECT}.pages.dev\`](${VERSION_URL}) |
+          
+          **Status**: Deployment completed successfully at $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          EOF
 
   # ===========================================================================
   # Consolidate Job - Gather all deployment URLs and update release notes
@@ -403,7 +570,14 @@ jobs:
       deployment-urls: ${{ steps.gather.outputs.deployment-urls }}
       primary-url: ${{ steps.gather.outputs.primary-url }}
     steps:
-      - name: Gather deployment URLs
+      - name: Download all deployment metadata
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deployment-metadata-*
+          path: deployment-results
+          merge-multiple: true
+
+      - name: Gather deployment information
         id: gather
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
@@ -412,9 +586,10 @@ jobs:
           DEPLOY_ALL="${{ needs.prepare.outputs.deploy-all }}"
           ENVIRONMENT="${{ needs.prepare.outputs.environment }}"
           
+          echo "::group::Consolidating Deployment Information"
+          
           # Build JSON with all deployment URLs
           if [[ "$DEPLOY_ALL" == "true" ]]; then
-            # All environments deployed
             DEPLOYMENT_URLS=$(cat <<EOF
           {
             "production": {
@@ -436,8 +611,8 @@ jobs:
           EOF
           )
             PRIMARY_URL="https://${PROJECT_NAME}.${DOMAIN_SUFFIX}"
+            echo "Deployment Scope: All Environments"
           else
-            # Single environment deployed
             if [[ "$ENVIRONMENT" == "production" ]]; then
               CF_PROJECT="${PROJECT_NAME}"
               CUSTOM_DOMAIN="${PROJECT_NAME}.${DOMAIN_SUFFIX}"
@@ -457,10 +632,14 @@ jobs:
           EOF
           )
             PRIMARY_URL="https://${CUSTOM_DOMAIN}"
+            echo "Deployment Scope: ${ENVIRONMENT}"
           fi
           
-          # Compact JSON (remove newlines)
+          # Compact JSON
           DEPLOYMENT_URLS_COMPACT=$(echo "$DEPLOYMENT_URLS" | jq -c .)
+          
+          echo "Primary URL: ${PRIMARY_URL}"
+          echo "::endgroup::"
           
           echo "deployment-urls=${DEPLOYMENT_URLS_COMPACT}" >> $GITHUB_OUTPUT
           echo "primary-url=${PRIMARY_URL}" >> $GITHUB_OUTPUT
@@ -471,46 +650,66 @@ jobs:
           DEPLOY_ALL="${{ needs.prepare.outputs.deploy-all }}"
           DEPLOYMENT_URLS='${{ steps.gather.outputs.deployment-urls }}'
           
-          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** \`${VERSION}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ## Deployment Summary
+          
+          ### Overview
+          
+          **Version**: `${{ needs.prepare.outputs.version }}`  
+          **Deploy Mode**: `${{ needs.prepare.outputs.deploy-mode }}`  
+          **Trigger**: `${{ inputs.trigger-type }}`
+          
+          EOF
           
           if [[ "$DEPLOY_ALL" == "true" ]]; then
-            echo "### All Environments Deployed ✅" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            
-            # Production
+            cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ### Production Environment
+          
+          EOF
             PROD_CUSTOM=$(echo "$DEPLOYMENT_URLS" | jq -r '.production.custom')
             PROD_PAGES=$(echo "$DEPLOYMENT_URLS" | jq -r '.production.pages')
-            echo "#### Production" >> $GITHUB_STEP_SUMMARY
-            echo "- 🌐 [${PROD_CUSTOM}](${PROD_CUSTOM})" >> $GITHUB_STEP_SUMMARY
-            echo "- 📄 [${PROD_PAGES}](${PROD_PAGES})" >> $GITHUB_STEP_SUMMARY
+            PROD_VERSION=$(echo "$DEPLOYMENT_URLS" | jq -r '.production.version')
+            echo "- Custom Domain: [${PROD_CUSTOM}](${PROD_CUSTOM})" >> $GITHUB_STEP_SUMMARY
+            echo "- Cloudflare Pages: [${PROD_PAGES}](${PROD_PAGES})" >> $GITHUB_STEP_SUMMARY
+            echo "- Version URL: [${PROD_VERSION}](${PROD_VERSION})" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             
-            # Staging
+            cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ### Staging Environment
+          
+          EOF
             STAGING_CUSTOM=$(echo "$DEPLOYMENT_URLS" | jq -r '.staging.custom')
             STAGING_PAGES=$(echo "$DEPLOYMENT_URLS" | jq -r '.staging.pages')
-            echo "#### Staging" >> $GITHUB_STEP_SUMMARY
-            echo "- 🌐 [${STAGING_CUSTOM}](${STAGING_CUSTOM})" >> $GITHUB_STEP_SUMMARY
-            echo "- 📄 [${STAGING_PAGES}](${STAGING_PAGES})" >> $GITHUB_STEP_SUMMARY
+            STAGING_VERSION=$(echo "$DEPLOYMENT_URLS" | jq -r '.staging.version')
+            echo "- Custom Domain: [${STAGING_CUSTOM}](${STAGING_CUSTOM})" >> $GITHUB_STEP_SUMMARY
+            echo "- Cloudflare Pages: [${STAGING_PAGES}](${STAGING_PAGES})" >> $GITHUB_STEP_SUMMARY
+            echo "- Version URL: [${STAGING_VERSION}](${STAGING_VERSION})" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             
-            # Review
+            cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ### Review Environment
+          
+          EOF
             REVIEW_CUSTOM=$(echo "$DEPLOYMENT_URLS" | jq -r '.review.custom')
             REVIEW_PAGES=$(echo "$DEPLOYMENT_URLS" | jq -r '.review.pages')
-            echo "#### Review" >> $GITHUB_STEP_SUMMARY
-            echo "- 🌐 [${REVIEW_CUSTOM}](${REVIEW_CUSTOM})" >> $GITHUB_STEP_SUMMARY
-            echo "- 📄 [${REVIEW_PAGES}](${REVIEW_PAGES})" >> $GITHUB_STEP_SUMMARY
+            REVIEW_VERSION=$(echo "$DEPLOYMENT_URLS" | jq -r '.review.version')
+            echo "- Custom Domain: [${REVIEW_CUSTOM}](${REVIEW_CUSTOM})" >> $GITHUB_STEP_SUMMARY
+            echo "- Cloudflare Pages: [${REVIEW_PAGES}](${REVIEW_PAGES})" >> $GITHUB_STEP_SUMMARY
+            echo "- Version URL: [${REVIEW_VERSION}](${REVIEW_VERSION})" >> $GITHUB_STEP_SUMMARY
           else
             ENVIRONMENT="${{ needs.prepare.outputs.environment }}"
+            ENV_NAME="${ENVIRONMENT^}"
+            
+            cat << EOF >> $GITHUB_STEP_SUMMARY
+          ### ${ENV_NAME} Environment
+          
+          EOF
             ENV_CUSTOM=$(echo "$DEPLOYMENT_URLS" | jq -r ".${ENVIRONMENT}.custom")
             ENV_PAGES=$(echo "$DEPLOYMENT_URLS" | jq -r ".${ENVIRONMENT}.pages")
-            
-            echo "### ${ENVIRONMENT^} Deployed ✅" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "- 🌐 [${ENV_CUSTOM}](${ENV_CUSTOM})" >> $GITHUB_STEP_SUMMARY
-            echo "- 📄 [${ENV_PAGES}](${ENV_PAGES})" >> $GITHUB_STEP_SUMMARY
+            ENV_VERSION=$(echo "$DEPLOYMENT_URLS" | jq -r ".${ENVIRONMENT}.version")
+            echo "- Custom Domain: [${ENV_CUSTOM}](${ENV_CUSTOM})" >> $GITHUB_STEP_SUMMARY
+            echo "- Cloudflare Pages: [${ENV_PAGES}](${ENV_PAGES})" >> $GITHUB_STEP_SUMMARY
+            echo "- Version URL: [${ENV_VERSION}](${ENV_VERSION})" >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Update GitHub Release
@@ -521,52 +720,57 @@ jobs:
             const deployAll = '${{ needs.prepare.outputs.deploy-all }}' === 'true';
             const environment = '${{ needs.prepare.outputs.environment }}';
             const deploymentUrls = JSON.parse('${{ steps.gather.outputs.deployment-urls }}');
-            const deploymentType = '${{ inputs.trigger-type }}' === 'manual' ? 'Manual' : 'Automatic';
+            const deploymentType = '${{ inputs.trigger-type }}' === 'manual' ? 'Manual' : 'Tag-Based';
             const deployMode = '${{ needs.prepare.outputs.deploy-mode }}';
             const timestamp = new Date().toISOString().split('T')[0];
             
             try {
               let release;
               
+              // Attempt to retrieve existing release
               try {
                 release = await github.rest.repos.getReleaseByTag({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   tag: version
                 });
+                core.info(`Found existing release for version ${version}`);
               } catch (error) {
                 if (error.status === 404) {
+                  // Create new release if it doesn't exist
                   const isPrerelease = /-(alpha|beta|rc|preview)/i.test(version);
                   release = await github.rest.repos.createRelease({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     tag_name: version,
                     name: `Release ${version}`,
-                    body: `## Release ${version}\n\n### Deployments\n`,
+                    body: `## Release ${version}\n\n### Deployment History\n\n`,
                     draft: false,
                     prerelease: isPrerelease
                   });
+                  core.info(`Created new release for version ${version}`);
                 } else {
                   throw error;
                 }
               }
               
               const currentBody = release.data.body || '';
-              const modeLabel = deployMode === 'static' ? ' (Static)' : '';
+              const modeIndicator = deployMode === 'static' ? ' [Static]' : '';
               let deploymentEntries = [];
               
               if (deployAll) {
-                // Create entries for all environments
+                // Generate entries for all environments
                 const environments = ['production', 'staging', 'review'];
                 for (const env of environments) {
                   const urls = deploymentUrls[env];
-                  const entry = `- **${env}**${modeLabel} (${deploymentType}): [${urls.custom.replace('https://', '')}](${urls.custom}) | [Pages](${urls.pages}) | [Version](${urls.version}) - ${timestamp}`;
+                  const entry = `- **${env.charAt(0).toUpperCase() + env.slice(1)}**${modeIndicator} (${deploymentType}): [${urls.custom.replace('https://', '')}](${urls.custom}) | [Cloudflare Pages](${urls.pages}) | [Version Branch](${urls.version}) — Deployed: ${timestamp}`;
                   deploymentEntries.push(entry);
                 }
               } else {
                 // Single environment entry
                 const urls = deploymentUrls[environment];
-                const entry = `- **${environment}**${modeLabel} (${deploymentType}): [${urls.custom.replace('https://', '')}](${urls.custom}) | [Pages](${urls.pages}) | [Version](${urls.version}) - ${timestamp}`;
+                const envName = environment.charAt(0).toUpperCase() + environment.slice(1);
+                const entry = `- **${envName}**${modeIndicator} (${deploymentType}): [${urls.custom.replace('https://', '')}](${urls.custom}) | [Cloudflare Pages](${urls.pages}) | [Version Branch](${urls.version}) — Deployed: ${timestamp}`;
                 deploymentEntries.push(entry);
               }
               
@@ -576,19 +780,26 @@ jobs:
               for (const entry of deploymentEntries) {
                 const envMatch = entry.match(/\*\*(\w+)\*\*/);
                 if (envMatch) {
-                  const env = envMatch[1];
-                  const envPattern = new RegExp(`- \\*\\*${env}\\*\\*.*`, 'g');
+                  const env = envMatch[1].toLowerCase();
+                  const envPattern = new RegExp(`^- \\*\\*${envMatch[1]}\\*\\*.*$`, 'gm');
                   
                   if (envPattern.test(updatedBody)) {
+                    // Replace existing entry for this environment
                     updatedBody = updatedBody.replace(envPattern, entry);
-                  } else if (updatedBody.includes('### Deployments')) {
-                    updatedBody = updatedBody.replace('### Deployments\n', `### Deployments\n${entry}\n`);
+                  } else if (updatedBody.includes('### Deployment History')) {
+                    // Add new entry under existing section
+                    updatedBody = updatedBody.replace(
+                      '### Deployment History\n',
+                      `### Deployment History\n${entry}\n`
+                    );
                   } else {
-                    updatedBody = updatedBody + `\n\n### Deployments\n${entry}\n`;
+                    // Create new deployment history section
+                    updatedBody = updatedBody + `\n\n### Deployment History\n${entry}\n`;
                   }
                 }
               }
               
+              // Update the release
               await github.rest.repos.updateRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -597,10 +808,17 @@ jobs:
               });
               
               if (deployAll) {
-                core.info(`Updated release notes for version ${version} (all environments)`);
+                core.info(`Updated release notes for ${version} (all environments)`);
               } else {
-                core.info(`Updated release notes for version ${version} (${environment})`);
+                core.info(`Updated release notes for ${version} (${environment} environment)`);
               }
+              
+              core.setOutput('release-url', release.data.html_url);
             } catch (error) {
-              core.warning(`Could not update release notes: ${error.message}`);
+              core.warning(`Failed to update release notes: ${error.message}`);
+              core.warning('This is non-critical. Deployment was successful.');
             }
+
+      - name: Log completion status
+        run: |
+          echo "::notice title=Deployment Workflow Complete::Version ${{ needs.prepare.outputs.version }} has been successfully deployed"
