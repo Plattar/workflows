@@ -249,14 +249,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: 'npm'
-          cache-dependency-path: ${{ inputs.build-directory }}/package-lock.json
 
       - name: Install dependencies
         working-directory: ${{ inputs.build-directory }}
         run: |
           echo "::group::Installing Node.js dependencies"
-          npm ci
+          ${{inputs.build-command}}
           echo "::endgroup::"
 
       - name: Execute build command
