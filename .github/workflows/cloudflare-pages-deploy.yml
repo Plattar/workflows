@@ -68,6 +68,14 @@ on:
         type: string
         default: 'latest'
       # -----------------------------------------------------------------------
+      # 404 Page Configuration
+      # -----------------------------------------------------------------------
+      generate-404-page:
+        description: 'Generate a default 404.html page if one does not exist'
+        required: false
+        type: boolean
+        default: true
+      # -----------------------------------------------------------------------
       # Artifact Configuration
       # -----------------------------------------------------------------------
       artifact-retention-days:
@@ -296,6 +304,108 @@ jobs:
           
           echo "::notice title=Build Complete::Successfully built ${FILE_COUNT} files (${OUTPUT_SIZE})"
 
+      - name: Generate 404 page if missing
+        if: inputs.generate-404-page == true
+        working-directory: ${{ inputs.build-directory }}/${{ inputs.output-directory }}
+        run: |
+          if [[ ! -f "404.html" ]]; then
+            echo "::notice title=Generating 404 Page::No 404.html found, creating default page"
+            
+            cat > 404.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>404 - Page Not Found</title>
+              <style>
+                  @import url('https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap');
+                  
+                  * {
+                      margin: 0;
+                      padding: 0;
+                      box-sizing: border-box;
+                  }
+                  
+                  body {
+                      font-family: "Figtree", sans-serif;
+                      background-color: #f7f7f7;
+                      color: #221f1f;
+                      display: flex;
+                      align-items: center;
+                      justify-content: center;
+                      min-height: 100vh;
+                      padding: 20px;
+                      line-height: 1.6;
+                  }
+                  
+                  .container {
+                      text-align: center;
+                      max-width: 600px;
+                  }
+                  
+                  .error-code {
+                      font-size: 120px;
+                      font-weight: 700;
+                      color: #221f1f;
+                      margin-bottom: 20px;
+                      line-height: 1;
+                      letter-spacing: -2px;
+                  }
+                  
+                  h1 {
+                      font-size: 32px;
+                      font-weight: 600;
+                      margin-bottom: 16px;
+                      color: #221f1f;
+                  }
+                  
+                  p {
+                      font-size: 18px;
+                      color: #221f1f;
+                      opacity: 0.8;
+                      margin-bottom: 0;
+                  }
+                  
+                  .divider {
+                      width: 60px;
+                      height: 3px;
+                      background-color: #221f1f;
+                      margin: 30px auto;
+                      opacity: 0.3;
+                  }
+                  
+                  @media (max-width: 768px) {
+                      .error-code {
+                          font-size: 80px;
+                      }
+                      
+                      h1 {
+                          font-size: 24px;
+                      }
+                      
+                      p {
+                          font-size: 16px;
+                      }
+                  }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <div class="error-code">404</div>
+                  <h1>Page Not Found</h1>
+                  <div class="divider"></div>
+                  <p>Sorry, the page you are looking for doesn't exist or has been moved.</p>
+              </div>
+          </body>
+          </html>
+          EOF
+            
+            echo "::notice title=404 Page Created::Default 404.html has been generated"
+          else
+            echo "::notice title=404 Page Exists::Using existing 404.html from build output"
+          fi
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -320,6 +430,7 @@ jobs:
           | Output Directory | `${{ inputs.output-directory }}` |
           | Artifact Name | `${{ needs.prepare.outputs.artifact-name }}` |
           | Retention Period | `${{ inputs.artifact-retention-days }}` days |
+          | 404 Page Generation | `${{ inputs.generate-404-page }}` |
           
           **Status**: Build completed successfully
           EOF
@@ -372,6 +483,108 @@ jobs:
           
           echo "::notice title=Verification Complete::Found ${FILE_COUNT} files (${SOURCE_SIZE}) in ${SOURCE_DIR}"
 
+      - name: Generate 404 page if missing
+        if: inputs.generate-404-page == true
+        working-directory: ${{ inputs.static-source-directory }}
+        run: |
+          if [[ ! -f "404.html" ]]; then
+            echo "::notice title=Generating 404 Page::No 404.html found, creating default page"
+            
+            cat > 404.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>404 - Page Not Found</title>
+              <style>
+                  @import url('https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap');
+                  
+                  * {
+                      margin: 0;
+                      padding: 0;
+                      box-sizing: border-box;
+                  }
+                  
+                  body {
+                      font-family: "Figtree", sans-serif;
+                      background-color: #f7f7f7;
+                      color: #221f1f;
+                      display: flex;
+                      align-items: center;
+                      justify-content: center;
+                      min-height: 100vh;
+                      padding: 20px;
+                      line-height: 1.6;
+                  }
+                  
+                  .container {
+                      text-align: center;
+                      max-width: 600px;
+                  }
+                  
+                  .error-code {
+                      font-size: 120px;
+                      font-weight: 700;
+                      color: #221f1f;
+                      margin-bottom: 20px;
+                      line-height: 1;
+                      letter-spacing: -2px;
+                  }
+                  
+                  h1 {
+                      font-size: 32px;
+                      font-weight: 600;
+                      margin-bottom: 16px;
+                      color: #221f1f;
+                  }
+                  
+                  p {
+                      font-size: 18px;
+                      color: #221f1f;
+                      opacity: 0.8;
+                      margin-bottom: 0;
+                  }
+                  
+                  .divider {
+                      width: 60px;
+                      height: 3px;
+                      background-color: #221f1f;
+                      margin: 30px auto;
+                      opacity: 0.3;
+                  }
+                  
+                  @media (max-width: 768px) {
+                      .error-code {
+                          font-size: 80px;
+                      }
+                      
+                      h1 {
+                          font-size: 24px;
+                      }
+                      
+                      p {
+                          font-size: 16px;
+                      }
+                  }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <div class="error-code">404</div>
+                  <h1>Page Not Found</h1>
+                  <div class="divider"></div>
+                  <p>Sorry, the page you are looking for doesn't exist or has been moved.</p>
+              </div>
+          </body>
+          </html>
+          EOF
+            
+            echo "::notice title=404 Page Created::Default 404.html has been generated"
+          else
+            echo "::notice title=404 Page Exists::Using existing 404.html from static source"
+          fi
+
       - name: Upload static artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -394,6 +607,7 @@ jobs:
           | Source Directory | `${{ inputs.static-source-directory }}` |
           | Artifact Name | `${{ needs.prepare.outputs.artifact-name }}` |
           | Retention Period | `${{ inputs.artifact-retention-days }}` days |
+          | 404 Page Generation | `${{ inputs.generate-404-page }}` |
           
           **Status**: Static files packaged successfully
           EOF
