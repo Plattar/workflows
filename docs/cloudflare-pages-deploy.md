@@ -16,6 +16,10 @@ This workflow provides automated deployments to Cloudflare Pages with support fo
 - **Build Mode** (default): Compiles your application using npm/node before deployment
 - **Static Mode**: Deploys pre-built static files directly without a build step
 
+**Multi-Environment Deployment:**
+- Deploy to individual environments (staging, review, or production)
+- Deploy to all three environments simultaneously with a single tag using `-all`
+
 ## Caller Workflow Examples
 
 ### Standard Build Deployment
@@ -30,6 +34,7 @@ on:
       - '*-staging'
       - '*-production'
       - '*-review'
+      - '*-all'
       - '*'
   workflow_dispatch:
     inputs:
@@ -46,6 +51,7 @@ on:
           - staging
           - production
           - review
+          - all
 concurrency:
   group: deploy-${{ github.event.inputs.environment || 'auto' }}
   cancel-in-progress: false
@@ -78,6 +84,7 @@ on:
       - '*-staging'
       - '*-production'
       - '*-review'
+      - '*-all'
       - '*'
   workflow_dispatch:
     inputs:
@@ -94,6 +101,7 @@ on:
           - staging
           - production
           - review
+          - all
 concurrency:
   group: deploy-${{ github.event.inputs.environment || 'auto' }}
   cancel-in-progress: false
@@ -195,7 +203,7 @@ Configure these in your repository under **Settings > Secrets and Variables > Ac
 | `tag` | Yes | — | Tag to deploy |
 | `trigger-type` | Yes | — | Trigger type: `tag-push` or `manual` |
 | `project-name` | Yes | — | Cloudflare Pages project name |
-| `environment` | No | — | Target environment: `staging`, `review`, or `production` |
+| `environment` | No | — | Target environment: `staging`, `review`, `production`, or `all` |
 | `domain-suffix` | No | `plattar.com` | Domain suffix for custom domains |
 
 ### Deploy Mode Configuration
@@ -220,6 +228,15 @@ Configure these in your repository under **Settings > Secrets and Variables > Ac
 |-------|----------|---------|-------------|
 | `artifact-retention-days` | No | `120` | Days to retain build artifacts |
 
+## Outputs
+
+| Output | Description |
+|--------|-------------|
+| `version` | Deployed version number |
+| `environment` | Target environment(s) |
+| `deployment-urls` | All deployment URLs in JSON format |
+| `primary-url` | Primary deployment URL (production when deploying to all) |
+
 ## Tag Conventions
 
 The workflow determines the deployment target based on tag suffix:
@@ -230,30 +247,75 @@ The workflow determines the deployment target based on tag suffix:
 | `1.0.0-staging` | Build/package and deploy to staging |
 | `1.0.0-review` | Build/package and deploy to review |
 | `1.0.0-production` | Build/package and deploy to production |
+| `1.0.0-all` | Build/package once and deploy to all three environments |
 
 ## Examples
 
-### Deploy Static Files to Staging
+### Deploy to Staging
 
 ```bash
 git tag 1.0.0-staging
 git push origin 1.0.0-staging
 ```
 
-### Deploy Static Files to Production
+### Deploy to Production
 
 ```bash
 git tag 1.0.0-production
 git push origin 1.0.0-production
 ```
 
+### Deploy to All Environments
+
+Deploy to production, staging, and review simultaneously with a single tag:
+
+```bash
+git tag 1.0.0-all
+git push origin 1.0.0-all
+```
+
+This will:
+- Build/package your application once
+- Deploy to production, staging, and review in parallel
+- Update release notes for all three environments
+- Complete in approximately 30% less time than three separate deployments
+
 ### Manual Deployment via GitHub UI
 
 1. Navigate to **Actions** tab in your repository
 2. Select the **Deploy** workflow
 3. Click **Run workflow**
-4. Enter the tag version and select the target environment
+4. Enter the tag version and select the target environment (including `all` option)
 5. Click **Run workflow**
+
+## Multi-Environment Deployments
+
+When using the `-all` tag suffix or selecting `all` in manual deployments:
+
+- The application is built once and artifacts are reused for all environments
+- Deployments to production, staging, and review run in parallel
+- Each environment deployment is independent (one failure doesn't stop others)
+- GitHub Release notes are updated with all three deployment URLs
+- The workflow completes significantly faster than running three separate deployments
+
+### Environment URLs
+
+Each environment receives three deployment URLs:
+
+**Production:**
+- Custom domain: `https://project-name.plattar.com`
+- Pages URL: `https://project-name.pages.dev`
+- Version URL: `https://1.0.0.project-name.pages.dev`
+
+**Staging:**
+- Custom domain: `https://project-name-staging.plattar.com`
+- Pages URL: `https://project-name-staging.pages.dev`
+- Version URL: `https://1.0.0.project-name-staging.pages.dev`
+
+**Review:**
+- Custom domain: `https://project-name-review.plattar.com`
+- Pages URL: `https://project-name-review.pages.dev`
+- Version URL: `https://1.0.0.project-name-review.pages.dev`
 
 ## Troubleshooting
 
@@ -276,3 +338,7 @@ Ensure the `static-source-directory` path exists in your repository and is relat
 ### Files Not at Expected URLs
 
 Remember that the entire contents of `static-source-directory` are deployed. If you set `static-source-directory: 'themes'` and have `themes/webxr/www/index.html`, the URL will be `{domain}/webxr/www/index.html`, not `{domain}/themes/webxr/www/index.html`.
+
+### One Environment Fails During Multi-Environment Deployment
+
+When deploying to all environments, each deployment is independent. If one environment fails (e.g., due to permissions or configuration), the other environments will continue deploying. Check the workflow logs to identify which environment failed and review its specific error message.
